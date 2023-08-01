@@ -16,4 +16,6 @@ docker run -p 5000:5000 -e EMAIL_USERNAME=your_email@example.com -e EMAIL_PASSWO
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Copyright 2023 Philipp Wagner
+
+This project is licensed under the GPLv3 License - see the [LICENSE](LICENSE) file for details.
