@@ -9,10 +9,13 @@ This App is still in development
 
 1. Clone this repository.
 2. Build the Docker image:
-docker build -t username/email-unsubscribe-links-scraper .
+```docker build -t email-unsubscribe-links-scraper .```
 3. Run the Docker container:
-docker run -p 5000:5000 -e EMAIL_USERNAME=your_email@example.com -e EMAIL_PASSWORD=your_email_password -e EMAIL_SERVER=your_email_server username/email-unsubscribe-links-scraper
+```docker run -p 5000:5000 -e EMAIL_USERNAME=your_email@example.com -e EMAIL_PASSWORD=your_email_password -e EMAIL_SERVER=your_email_server email-unsubscribe-links-scraper```
 4. Access the application in your web browser at http://localhost:5000.
+
+### For non-build-use:
+Run following command: ```docker run -p 5000:5000 -e EMAIL_USERNAME=your_email@example.com -e EMAIL_PASSWORD=your_email_password -e EMAIL_SERVER=your_email_server rsclub22/email-unsubscribe-links-scraper```
 
 ## License
 
