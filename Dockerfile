@@ -13,3 +13,6 @@ COPY . .
 
 # Starte die Anwendung, wenn der Container gestartet wird
 CMD ["python", "app.py"]
+
+#Expose den Port 5000 (Nur Dokumentation für Entwickler)
+EXPOSE 5000
