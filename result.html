@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>E-Mail Unsubscribe Links Result</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>E-Mail Unsubscribe Links Result</h1>
+        <table>
+            <tr>
+                <th>Email Address</th>
+                <th>Subject</th>
+                <th>Unsubscribe Link</th>
+                <th>Move to Trash</th>
+            </tr>
+            {% for email_id, data in links_data.items() %}
+            <tr>
+                <td>{{ email_id }}</td>
+                <td>{{ data.subject }}</td>
+                <td>
+                    {% for link in data.links %}
+                        <a href="{{ link }}" target="_blank">{{ link[:30] + '...' }}</a><br>
+                    {% endfor %}
+                </td>
+                <td>
+                    <form action="{{ url_for('move_to_trash') }}" method="post">
+                        <input type="hidden" name="email_id" value="{{ email_id }}">
+                        <button type="submit" class="btn-delete">Move to Trash</button>
+                    </form>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        <form action="/" method="get">
+            <button type="submit" class="btn-primary">Back to Home</button>
+        </form>
+        <form action="{{ url_for('move_all_to_trash') }}" method="post">
+            <button type="submit" class="btn-delete">Move All to Trash</button>
+        </form>
+    </div>
+</body>
+</html>

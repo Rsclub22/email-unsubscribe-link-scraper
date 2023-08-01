@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>E-Mail Unsubscribe Link Finder</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>E-Mail Unsubscribe Link Finder</h1>
+        <p>Email your emails to: {{ email_address }}</p>
+        <form action="/result" method="get">
+            <button type="submit" class="btn-primary">Start</button>
+        </form>
+    </div>
+</body>
+</html>
