@@ -4,6 +4,7 @@ import re
 import os
 from flask import Flask, render_template, request, redirect, url_for
 from dotenv import load_dotenv
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 load_dotenv()  # Laden der Umgebungsvariablen aus der .env-Datei
@@ -15,6 +16,8 @@ EMAIL_SERVER = os.environ.get("EMAIL_SERVER")
 
 template_dir = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__, template_folder=template_dir)
+link_pattern = r"<a href=\"(.*?)\">(.*?)</a>"
+unsubscribe_pattern = r"(?i)\babbestellen\b|\bunsubscribe\b|\bdeabonnieren\b|\babbestellung\b"
 
 def get_text_from_email(email_message):
     text = ""
@@ -29,28 +32,46 @@ def get_text_from_email(email_message):
     return text
 
 def find_unsubscribe_links(text):
-    # Erweitere die Liste der Abmeldelinks-Patterns bei Bedarf
-    unsubscribe_patterns = [
-        r"(?i)\babbestellen\b",      # Deutsch - abbestellen
-        r"(?i)\babbestellung\b",    # Deutsch - abbestellung
-        r"(?i)\bdeabonnieren\b",    # Deutsch - deabonnieren
-        r"(?i)\bunsubscribe\b",     # Englisch - unsubscribe
-    ]
+    links = re.finditer(link_pattern, text)
     unsubscribe_links = []
-    for pattern in unsubscribe_patterns:
-        matches = re.findall(pattern, text)
-        if matches:
-            for match in matches:
-                link = find_link_in_text(text)
-                if link:
-                    unsubscribe_links.append(link)
+    for link in links:
+        link_url = link.group(1)  # Die URL des Links befindet sich in der Gruppe 1
+        link_text = link.group(2)  # Der Text des Links befindet sich in der Gruppe 2
+
+        # Überprüfen, ob der Link-Text oder die URL auf das Unsubscribe-Pattern passen
+        if re.search(unsubscribe_pattern, link_text) or re.search(unsubscribe_pattern, link_url):
+            unsubscribe_links.append(link.group(0))
     return unsubscribe_links
 
-def find_link_in_text(text):
-    # Einen einfachen Ansatz zur Link-Erkennung in Texten (nicht perfekt)
-    link_pattern = r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+"
-    link_matches = re.findall(link_pattern, text)
-    return link_matches[0] if link_matches else None
+def find_unsubscribe_links_in_text(text, html_links):
+    soup = BeautifulSoup(text, 'html.parser', multi_valued_attributes=None)
+    unsubscribe_links = []
+
+    # Zusätzlich nach einfachen URLs suchen und auf das Unsubscribe-Pattern prüfen
+    simple_urls = re.findall(r"(https?://\S+)", text)
+    for url in simple_urls:
+        if re.search(unsubscribe_pattern, url) and url not in html_links:
+            unsubscribe_links.append(url)
+
+    for link in soup.find_all('a', href=True):
+        link_url = str(link.get('href'))
+        # Überprüfen, ob der Link-URL oder der Link-Text auf das Unsubscribe-Pattern passt und nicht in den HTML-Links enthalten ist
+        if re.search(unsubscribe_pattern, str(link)) and link_url not in html_links:
+            unsubscribe_links.append(link_url)
+
+    return unsubscribe_links
+
+def find_links_in_text(text):
+    link_pattern = r'(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:\'".,<>?«»“”‘’]))'
+    links = re.findall(link_pattern, text)
+    return links
+
+
+def find_all_links_in_text(text):
+    links = []
+    for match in re.findall(link_pattern, text):
+        links.append(match)
+    return links
 
 def get_subject_from_email(email_message):
     subject = email_message.get("Subject")
@@ -93,6 +114,7 @@ def result():
 
     _, messages = mail.search(None, "ALL")
     links_data = {}
+    html_links = set()
 
     for message_num in messages[0].split():
         _, msg_data = mail.fetch(message_num, "(RFC822)")
@@ -100,11 +122,14 @@ def result():
         body = get_text_from_email(msg)
         subject = get_subject_from_email(msg)
         if body:
-            unsubscribe_links = find_unsubscribe_links(body)
-            if unsubscribe_links:
+            unsubscribe_links_in_html = find_unsubscribe_links(body)
+            html_links.update(unsubscribe_links_in_html)
+            unsubscribe_links_in_text = find_unsubscribe_links_in_text(body, html_links)
+            all_unsubscribe_links = list(set(unsubscribe_links_in_html + unsubscribe_links_in_text))
+            if all_unsubscribe_links:
                 links_data[message_num.decode()] = {
                     "subject": subject,
-                    "links": list(set(unsubscribe_links))
+                    "links": all_unsubscribe_links
                 }
 
     mail.logout()
