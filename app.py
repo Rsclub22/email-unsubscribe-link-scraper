@@ -17,7 +17,7 @@ EMAIL_SERVER = os.environ.get("EMAIL_SERVER")
 template_dir = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__, template_folder=template_dir)
 link_pattern = r"<a href=\"(.*?)\">(.*?)</a>"
-unsubscribe_pattern = r"(?i)\babbestellen\b|\bunsubscribe\b|\bdeabonnieren\b|\babbestellung\b"
+unsubscribe_pattern = r"(?i)\babbestellen\b|\bunsubscribe\b|\bdeabonnieren\b|\babbestellung\b|\babmelden\b"
 
 def get_text_from_email(email_message):
     text = ""
