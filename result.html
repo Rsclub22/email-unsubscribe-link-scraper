@@ -9,7 +9,7 @@
         <h1>E-Mail Unsubscribe Links Result</h1>
         <table>
             <tr>
-                <th>Email ID</th>
+                <th>UID</th>
                 <th>Subject</th>
                 <th>Unsubscribe Link</th>
                 <th>Move to Trash</th>
@@ -20,7 +20,7 @@
                 <td>{{ data.subject }}</td>
                 <td>
                     {% for link in data.links %}
-                        <a href="{{ link }}" target="_blank">{{ link[:30] + '...' }}</a><br>
+                        <a href="{{ link }}" target="_blank" rel="noopener noreferrer">{{ link[:30] + '...' }}</a><br>
                     {% endfor %}
                 </td>
                 <td>
@@ -36,6 +36,9 @@
             <button type="submit" class="btn-primary">Back to Home</button>
         </form>
         <form action="{{ url_for('move_all_to_trash') }}" method="post">
+            {% for email_id in links_data %}
+            <input type="hidden" name="email_id" value="{{ email_id }}">
+            {% endfor %}
             <button type="submit" class="btn-delete">Move All to Trash</button>
         </form>
     </div>

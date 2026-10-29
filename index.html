@@ -8,9 +8,23 @@
     <div class="container">
         <h1>E-Mail Unsubscribe Link Finder</h1>
         <p>Email your emails to: {{ email_address }}</p>
+        {% if error %}<p class="error">{{ error }}</p>{% endif %}
+        {% if connected %}
         <form action="/result" method="get">
             <button type="submit" class="btn-primary">Start</button>
         </form>
+        {% if oauth %}
+        <form action="/disconnect" method="post">
+            <button type="submit" class="btn-delete">Disconnect mailbox</button>
+        </form>
+        {% endif %}
+        {% else %}
+        <p>The collection mailbox is not connected yet. Open this page in a private window and sign in
+           as <strong>{{ email_address }}</strong> (technical account) – not with your own account.</p>
+        <form action="/connect" method="get">
+            <button type="submit" class="btn-primary">Connect mailbox</button>
+        </form>
+        {% endif %}
     </div>
 </body>
 </html>

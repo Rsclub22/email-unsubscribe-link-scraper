@@ -22,3 +22,15 @@ Run following command: ```docker run -p 5000:5000 -e EMAIL_USERNAME=your_email@e
 Copyright 2023 Philipp Wagner
 
 This project is licensed under the GPLv3 License - see the [LICENSE](LICENSE) file for details.
+
+## Betrieb
+
+Konfiguration per Umgebung: `EMAIL_SERVER`, `EMAIL_PORT` (993), `EMAIL_USERNAME`, `EMAIL_PASSWORD`
+(Sammelpostfach), optional `EMAIL_FOLDER` (`INBOX`) und `TRASH_FOLDER` (`Trash`).
+Statt `EMAIL_PASSWORD` geht SSO (OAuth/XOAUTH2): `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`,
+`OIDC_REDIRECT_URI` (`https://<host>/oidc/callback`), `TOKEN_KEY` (Fernet-Schlüssel) und `DATA_DIR` (`/data`).
+Dann zeigt die Startseite „Connect mailbox“: einmal im privaten Fenster als technisches Konto des
+Sammelpostfachs am SSO anmelden; das Refresh-Token liegt verschlüsselt in `DATA_DIR/oauth-token`.
+Der Container startet gunicorn auf Port 5000 (kein Flask-Debugger) und gehört hinter einen
+Reverse Proxy mit Anmeldung (bei Wagnersnetz Caddy `forward_auth` über Authelia).
+Tests: `pytest tests`.
