@@ -21,6 +21,7 @@ from cryptography.fernet import Fernet, InvalidToken
 SCOPES = "openid profile email offline_access"
 REFRESH_MARGIN_SEC = 60
 PENDING_TTL_SEC = 600
+MAX_PENDING = 20   # /connect is reachable without login: bound the open requests
 
 
 class OAuthError(Exception):
@@ -108,6 +109,8 @@ class MailboxOAuth:
         now = self.clock()
         with self._lock:
             self._pending = {k: v for k, v in self._pending.items() if now - v[1] < PENDING_TTL_SEC}
+            while len(self._pending) >= MAX_PENDING:
+                del self._pending[min(self._pending, key=lambda k: self._pending[k][1])]
             self._pending[state] = (verifier, now)
         query = {
             "response_type": "code",

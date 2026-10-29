@@ -139,3 +139,37 @@ def test_index_shows_connect_when_not_connected(monkeypatch):
     monkeypatch.setattr(unsub, "OAUTH", FakeOAuth())
     html = unsub.app.test_client().get("/").get_data(as_text=True)
     assert 'action="/connect"' in html and 'action="/result"' not in html
+
+
+def test_callback_confirms_without_redirect(monkeypatch):
+    import app as unsub
+
+    class FakeOAuth:
+        def finish(self, state, code):
+            assert (state, code) == ("s", "c")
+
+    monkeypatch.setattr(unsub, "OAUTH", FakeOAuth())
+    r = unsub.app.test_client().get("/oidc/callback?state=s&code=c")
+    assert r.status_code == 200 and "connected" in r.get_data(as_text=True)
+
+
+def test_callback_error_is_shown(monkeypatch):
+    import app as unsub
+
+    class FakeOAuth:
+        def finish(self, state, code):
+            raise oauth.OAuthError("Signed in as philipp@example.org, expected unsubscribe-bot@example.org")
+
+        def connected(self):
+            return False
+
+    monkeypatch.setattr(unsub, "OAUTH", FakeOAuth())
+    r = unsub.app.test_client().get("/oidc/callback?state=s&code=c")
+    assert r.status_code == 400 and "expected unsubscribe-bot" in r.get_data(as_text=True)
+
+
+def test_pending_requests_are_bounded(tmp_path):
+    mb = _mb(tmp_path, [])
+    for _ in range(oauth.MAX_PENDING + 15):
+        mb.start()
+    assert len(mb._pending) == oauth.MAX_PENDING

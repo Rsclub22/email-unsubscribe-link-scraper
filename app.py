@@ -150,14 +150,22 @@ def oidc_callback():
     if not OAUTH:
         abort(404)
     if request.args.get("error"):
-        return redirect(url_for("index", error=request.args["error"]))
+        return render_template("index.html", email_address=EMAIL_USERNAME, oauth=True, connected=False,
+                               error=request.args["error"]), 400
     try:
         OAUTH.finish(request.args.get("state", ""), request.args.get("code", ""))
     except OAuthError as e:
         logger.warning("Mailbox connect failed: %s", e)
-        return redirect(url_for("index", error=str(e)))
+        return render_template("index.html", email_address=EMAIL_USERNAME, oauth=True, connected=False,
+                               error=str(e)), 400
     logger.info("Collection mailbox %s connected via OAuth", EMAIL_USERNAME)
-    return redirect(url_for("index"))
+    # the browser session now belongs to the technical account, which forward_auth does not let in:
+    # confirm here instead of redirecting to the start page
+    return (
+        "<!doctype html><meta charset=utf-8><title>Connected</title>"
+        "<p>Collection mailbox connected. Close this private window and open the Unsubscriber again "
+        "in your normal browser.</p>"
+    )
 
 
 @app.route("/disconnect", methods=["POST"])

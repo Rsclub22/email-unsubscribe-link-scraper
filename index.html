@@ -19,8 +19,8 @@
         </form>
         {% endif %}
         {% else %}
-        <p>The collection mailbox is not connected yet. Open this page in a private window and sign in
-           as <strong>{{ email_address }}</strong> (technical account) – not with your own account.</p>
+        <p>The collection mailbox is not connected yet. Open <code>/connect</code> of this site in a private
+           window and sign in as <strong>{{ email_address }}</strong> (technical account).</p>
         <form action="/connect" method="get">
             <button type="submit" class="btn-primary">Connect mailbox</button>
         </form>
