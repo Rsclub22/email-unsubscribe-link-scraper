@@ -38,3 +38,8 @@ def test_domain_must_match_exactly(domain):
 
 def test_subdomain_is_not_allowed_implicitly():
     assert original_recipient("To: x@mail.wagnersnetz.de\n", "", ALLOWED) == ""
+
+
+def test_malformed_forwarder_is_not_used():
+    assert original_recipient("no header", "a@b@wagnersnetz.de", ALLOWED) == ""
+    assert original_recipient("no header", "<x y@wagnersnetz.de>", ALLOWED) == ""

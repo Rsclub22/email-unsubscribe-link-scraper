@@ -25,4 +25,4 @@ def original_recipient(text: str, forwarder: str, allowed_domains) -> str:
             if _allowed(address.lower(), allowed_domains):
                 return address.lower()
     sender = parseaddr(forwarder or "")[1].lower()
-    return sender if sender and _allowed(sender, allowed_domains) else ""
+    return sender if _ADDRESS.fullmatch(sender) and _allowed(sender, allowed_domains) else ""
