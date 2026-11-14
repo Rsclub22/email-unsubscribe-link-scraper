@@ -7,7 +7,8 @@ from email.message import EmailMessage
 import pytest
 
 from cases import CaseStore
-from worker import AgentUnavailable, Worker
+from cases import case_key
+from worker import AgentUnavailable, Worker, _tick
 
 
 def mail_bytes(mid, link="https://shop.example/unsubscribe/1", to="philipp@wagnersnetz.de", links=None,
@@ -30,6 +31,8 @@ class FakeIMAP:
         self.deleted = set()
         self.fail_copy = False
         self.logged_out = False
+        self.fail_store_once = False
+        self.calls = []
 
     def select(self, folder):
         if folder not in self.folders:
@@ -44,6 +47,7 @@ class FakeIMAP:
         return "OK", [b"created"]
 
     def uid(self, command, *args):
+        self.calls.append((command, args))
         box = self.folders[self.selected]
         if command == "search":
             if len(args) >= 4 and args[1] == "HEADER":
@@ -59,6 +63,9 @@ class FakeIMAP:
             self.folders[args[1]][b"9" + args[0]] = box[args[0]]
             return "OK", [b""]
         if command == "store":
+            if self.fail_store_once:
+                self.fail_store_once = False
+                return "NO", [b"store failed"]
             self.deleted.add((self.selected, args[0]))
             return "OK", [b""]
         raise AssertionError(command)
@@ -242,3 +249,127 @@ def test_spoofed_display_name_does_not_help(store):
     agent = Agent(OK)
     summary = worker(store, imap, agent, allowed_senders=("jens@wagnersnetz.de",)).run_once()
     assert agent.calls == [] and store.all() == [] and summary["ignored"] == 1
+
+
+def old_case(store, key, address="jens@wagnersnetz.de"):
+    store.add(key, "Fwd: old", ["https://shop.example/unsubscribe/1"], address)
+
+
+def test_old_case_of_a_sender_no_longer_allowed_is_not_handled(store):
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>", sender="Mallory <mallory@evil.example>")})
+    worker(store, imap, None, allowed_senders=()).run_once()
+    assert store.get("<a@x>")["state"] == "new"
+    agent = Agent(OK)
+    summary = worker(store, imap, agent, allowed_senders=("jens@wagnersnetz.de",)).run_once()
+    assert agent.calls == [] and summary["ignored"] == 1 and summary["handled"] == 0
+    assert (store.get("<a@x>")["state"], store.get("<a@x>")["attempts"]) == ("new", 0)
+
+
+def test_case_whose_mail_left_the_inbox_is_not_handled(store):
+    old_case(store, "<gone@x>")
+    agent = Agent(OK)
+    worker(store, FakeIMAP({}), agent).run_once()
+    assert agent.calls == []
+
+
+def test_skipped_cases_do_not_eat_the_budget(store):
+    for i in range(3):
+        old_case(store, f"<gone{i}@x>")
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>"), b"2": mail_bytes("<b@x>")})
+    agent = Agent(OK, OK, OK)
+    assert worker(store, imap, agent, max_cases=2).run_once()["handled"] == 2
+    assert len(agent.calls) == 2 and store.get("<a@x>")["state"] == "unsubscribed"
+
+
+def test_agent_bug_ends_the_case_unclear_and_the_run_goes_on(store):
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>"), b"2": mail_bytes("<b@x>")})
+    summary = worker(store, imap, Agent(RuntimeError("boom"), OK)).run_once()
+    first, second = store.get("<a@x>"), store.get("<b@x>")
+    assert (first["state"], first["reason"], first["attempts"]) == ("unclear", "agent error", 1)
+    assert second["state"] == "unsubscribed"
+    assert summary["handled"] == 2 and summary["error"] == ""
+
+
+class RawAgent:
+    def __init__(self, result):
+        self.result = result
+
+    def __call__(self, url, address):
+        return self.result
+
+
+@pytest.mark.parametrize("result", [{}, {"result": "bought"}, None, "text"])
+def test_malformed_agent_result_ends_the_case_unclear(store, result):
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>")})
+    summary = worker(store, imap, RawAgent(result)).run_once()
+    c = store.get("<a@x>")
+    assert (c["state"], c["reason"], c["attempts"]) == ("unclear", "agent error", 1)
+    assert summary["handled"] == 1 and summary["error"] == ""
+
+
+def test_mail_with_non_ascii_message_id_does_not_stop_the_run(store):
+    raw = ("Message-ID: <näh@x>\nSubject: Fwd: x\nFrom: jens@wagnersnetz.de\n\n"
+           "Von: news@shop.example\nAn: philipp@wagnersnetz.de\n\nhttps://shop.example/unsubscribe/9\n").encode("utf-8")
+    import email
+    with pytest.raises(Exception):
+        case_key(email.message_from_bytes(raw))   # proves the mail really is a poison pill
+    imap = FakeIMAP({b"1": raw, b"2": mail_bytes("<b@x>")})
+    summary = worker(store, imap, Agent(OK, OK)).run_once()
+    assert store.get("<b@x>")["state"] == "unsubscribed" and summary["error"] == ""
+
+
+@pytest.mark.parametrize("key", ["<a\r\nb@x>", "<a@x>\\", '<a"b@x>', "<n\u00e4h@x>"])
+def test_cleanup_never_sends_a_hostile_message_id(store, key):
+    old_case(store, key)
+    store.claim(key)
+    store.finish(key, "unsubscribed")
+    store.mark_moved(key)
+    store._run("UPDATE cases SET updated_at = ? WHERE key = ?", (1.0, key))
+    imap = FakeIMAP({})
+    imap.folders["Erledigt"] = {}
+    summary = worker(store, imap, Agent()).run_once()
+    assert summary["cleaned"] == 1 and store.get(key) is None
+    assert not any(cmd == "search" and key in " ".join(map(str, args)) for cmd, args in imap.calls)
+
+
+def test_scan_from_a_request_does_not_change_a_runs_counters(store):
+    w = worker(store, FakeIMAP({}), Agent())
+    result = w.scan(FakeIMAP({b"1": mail_bytes("<a@x>")}))
+    assert len(result) == 2 and not hasattr(w, "_created") and not hasattr(w, "_ignored")
+
+
+def test_failed_delete_flag_keeps_the_case_unmoved(store):
+    imap = FakeIMAP({b"7": mail_bytes("<a@x>")})
+    imap.fail_store_once = True
+    w = worker(store, imap, Agent(OK))
+    assert w.run_once()["moved"] == 0
+    assert store.get("<a@x>")["moved"] == 0 and b"7" in imap.folders["INBOX"]
+    assert w.run_once()["moved"] == 1 and store.get("<a@x>")["moved"] == 1
+
+
+ALL_KEYS = {"new", "handled", "unsubscribed", "moved", "cleaned", "without_link", "ignored", "error"}
+
+
+class Boom:
+    def __init__(self, store, set_meta_fails=False):
+        self.store, self.fail = store, set_meta_fails
+        self.clock = lambda: 1.0
+
+    def run_once(self):
+        raise ValueError("secret subject line")
+
+
+class BrokenStore:
+    def set_meta(self, k, v):
+        raise OSError("disk")
+
+
+def test_tick_records_only_the_exception_type(store):
+    _tick(Boom(store))
+    last = json.loads(store.meta("last_run"))
+    assert set(last) == ALL_KEYS and last["error"] == "ValueError"
+    assert "secret subject line" not in store.meta("last_run")
+
+
+def test_tick_survives_a_failing_store():
+    _tick(Boom(BrokenStore()))

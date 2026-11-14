@@ -13,6 +13,13 @@ from forwarded import original_recipient
 logger = logging.getLogger(__name__)
 
 MAX_LINKS = 2
+FINAL_RESULTS = ("unsubscribed", "not_possible", "unclear", "error")
+SUMMARY_KEYS = ("new", "handled", "unsubscribed", "moved", "cleaned", "without_link", "ignored", "error")
+
+
+def _searchable(key: str) -> bool:
+    """Only plain printable ASCII without quote and backslash may go into an IMAP SEARCH command."""
+    return bool(key) and all(0x20 <= ord(c) <= 0x7E and c not in '"\\' for c in key)
 
 
 class AgentUnavailable(Exception):
@@ -31,30 +38,34 @@ class Worker:
 
     def scan(self, mail) -> tuple[dict, int]:
         """Create a case for every mail with unsubscribe links. Returns ({key: uid}, mails without link)."""
+        return self._scan(mail)[:2]
+
+    def _scan(self, mail) -> tuple[dict, int, int, int]:
+        """Like scan, plus the number of created cases and of ignored mails (no instance state)."""
         _, data = mail.uid("search", None, "ALL")
-        uids, without, self._created, self._ignored = {}, 0, 0, 0
+        uids, without, created, ignored = {}, 0, 0, 0
         for uid in data[0].split():
             try:
                 _, fetched = mail.uid("fetch", uid, "(BODY.PEEK[])")
                 message = email.message_from_bytes(fetched[0][1])
                 subject, links, text = self.parse(message)
+                if not links:
+                    without += 1
+                    continue
+                forwarder = parseaddr(message.get("From", ""))[1]
+                if (self.allowed_senders and forwarder.lower() not in self.allowed_senders) or (
+                        not self.allowed_senders and self.agent is not None):   # fail closed
+                    ignored += 1
+                    continue
+                key = case_key(message)
+                recipient = original_recipient(text, forwarder, self.allowed_domains)
             except Exception as e:   # one broken mail must not stop the run
                 logger.warning("mail %s skipped: %s", uid, type(e).__name__)
                 continue
-            if not links:
-                without += 1
-                continue
-            forwarder = parseaddr(message.get("From", ""))[1]
-            sender = forwarder.lower()
-            if (self.allowed_senders and sender not in self.allowed_senders) or (
-                    not self.allowed_senders and self.agent is not None):   # fail closed
-                self._ignored += 1
-                continue
-            key = case_key(message)
             uids[key] = uid
-            if self.store.add(key, subject, links, original_recipient(text, forwarder, self.allowed_domains)):
-                self._created += 1
-        return uids, without
+            if self.store.add(key, subject, links, recipient):
+                created += 1
+        return uids, without, created, ignored
 
     def _handle(self, case: dict) -> str:
         """Run one case through the agent. Returns the final state; raises AgentUnavailable."""
@@ -63,6 +74,8 @@ class Worker:
         try:
             for link in case["links"][:MAX_LINKS]:
                 result = self.agent(link, case["address"])
+                if result["result"] not in FINAL_RESULTS:
+                    raise ValueError("malformed agent result")
                 if result["result"] == "error":
                     raise AgentUnavailable(result.get("reason", "agent error"))
                 if result["result"] == "unsubscribed" or result.get("reason") == "login":
@@ -70,6 +83,10 @@ class Worker:
         except AgentUnavailable:
             self.store.release(case["key"])
             raise
+        except Exception as e:   # agent bug or malformed result: the attempt counts, the run goes on
+            logger.warning("agent failed on a case: %s", type(e).__name__)
+            self.store.finish(case["key"], "unclear", "agent error")
+            return "unclear"
         self.store.finish(case["key"], result["result"], result.get("reason", ""), result.get("evidence", ""),
                           result.get("evidence_url", ""))
         return result["result"]
@@ -86,7 +103,10 @@ class Worker:
             if status != "OK":
                 logger.warning("could not move a mail to %s", self.done_folder)
                 continue
-            mail.uid("store", uid, "+FLAGS", "(\\Deleted)")
+            status, _ = mail.uid("store", uid, "+FLAGS", "(\\Deleted)")
+            if status != "OK":
+                logger.warning("could not flag a copied mail as deleted")
+                continue
             self.store.mark_moved(case["key"])
             moved += 1
         mail.expunge()
@@ -101,8 +121,9 @@ class Worker:
             return 0
         try:
             for case in expired:
-                if not case["key"].startswith("sha256:"):   # mails without Message-ID cannot be found again
-                    _, data = mail.uid("search", None, "HEADER", "Message-ID", '"' + case["key"].replace('"', "") + '"')
+                key = case["key"]
+                if not key.startswith("sha256:") and _searchable(key):   # others cannot be found (or not safely)
+                    _, data = mail.uid("search", None, "HEADER", "Message-ID", '"' + key + '"')
                     for uid in data[0].split():
                         mail.uid("store", uid, "+FLAGS", "(\\Deleted)")
                 self.store.delete(case["key"])
@@ -122,10 +143,13 @@ class Worker:
                 return self._note(summary)
             mail = self.connect()
             try:
-                uids, summary["without_link"] = self.scan(mail)
-                summary["new"], summary["ignored"] = self._created, self._ignored
+                uids, summary["without_link"], summary["new"], summary["ignored"] = self._scan(mail)
                 if self.agent is not None:
-                    for case in self.store.pending(self.max_cases):
+                    for case in self.store.pending(10_000):
+                        if summary["handled"] >= self.max_cases:
+                            break
+                        if case["key"] not in uids:   # only cases this scan vouched for (mail there, sender allowed)
+                            continue
                         try:
                             state = self._handle(case)
                         except AgentUnavailable as e:
@@ -147,17 +171,28 @@ class Worker:
         return summary
 
 
+def _tick(worker: Worker) -> None:
+    """One scheduled run. Never raises; notes only the exception type (messages can contain mail content)."""
+    try:
+        worker.run_once()
+    except Exception as e:
+        name = type(e).__name__
+        logger.warning("scheduled run failed: %s", name)
+        try:
+            summary = {k: 0 for k in SUMMARY_KEYS}
+            summary["error"] = name
+            worker.store.set_meta("last_run", json.dumps(summary))
+            worker.store.set_meta("last_run_at", str(int(worker.clock())))
+        except Exception as e2:
+            logger.warning("could not note the failed run: %s", type(e2).__name__)
+
+
 def start_scheduler(worker: Worker, interval_seconds: int) -> threading.Thread:
     """Background thread: one run every interval. Errors (mailbox not connected, IMAP down) are noted, not raised."""
 
     def loop():
         while True:
-            try:
-                worker.run_once()
-            except Exception as e:
-                logger.warning("scheduled run failed: %s: %s", type(e).__name__, e)
-                worker.store.set_meta("last_run", json.dumps({"error": f"{type(e).__name__}: {e}"[:200]}))
-                worker.store.set_meta("last_run_at", str(int(worker.clock())))
+            _tick(worker)
             time.sleep(interval_seconds)
 
     thread = threading.Thread(target=loop, name="unsubscribe-scheduler", daemon=True)
