@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>E-Mail Unsubscribe Cases</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>E-Mail Unsubscribe Cases</h1>
+        <p>
+            Last run: {{ last_at }}{% if last %} –
+            {{ last.get('new', 0) }} new, {{ last.get('unsubscribed', 0) }} unsubscribed,
+            {{ last.get('moved', 0) }} moved, {{ last.get('cleaned', 0) }} cleaned up.
+            {{ last.get('without_link', 0) }} mail(s) without unsubscribe link.
+            {{ last.get('ignored', 0) }} mail(s) from senders that are not allowed.{% endif %}
+        </p>
+        {% if last.get('error') %}<p class="error">Last run: {{ last['error'] }}</p>{% endif %}
+        {% if not agent %}<p class="error">The agent is switched off: cases are listed, nothing is unsubscribed automatically.</p>{% endif %}
+        <form action="{{ url_for('run_now') }}" method="post">
+            <button type="submit" class="btn-primary">Run now</button>
+        </form>
+        <form action="{{ url_for('pause') }}" method="post">
+            <input type="hidden" name="paused" value="{{ '0' if paused else '1' }}">
+            <button type="submit" class="btn-delete">{{ 'Resume agent' if paused else 'Pause agent' }}</button>
+        </form>
+        <table>
+            <tr>
+                <th>Subject</th>
+                <th>State</th>
+                <th>Reason</th>
+                <th>Unsubscribe Link</th>
+                <th>Actions</th>
+            </tr>
+            {% for case in cases %}
+            <tr>
+                <td>{{ case.subject }}</td>
+                <td>{{ case.label }}</td>
+                <td>
+                    {{ case.reason }}
+                    {% if case.evidence %}<br><small>“…{{ case.evidence }}” ({{ case.evidence_url }})</small>{% endif %}
+                </td>
+                <td>
+                    {% for link in case.links %}
+                        <a href="{{ link }}" target="_blank" rel="noopener noreferrer">{{ link[:30] + '...' }}</a><br>
+                    {% endfor %}
+                </td>
+                <td>
+                    {% if case.state in ('not_possible', 'unclear') %}
+                    <form action="{{ url_for('retry') }}" method="post">
+                        <input type="hidden" name="key" value="{{ case.key }}">
+                        <button type="submit" class="btn-primary">Try again</button>
+                    </form>
+                    {% endif %}
+                    {% if case.uid %}
+                    <form action="{{ url_for('move_to_trash') }}" method="post">
+                        <input type="hidden" name="email_id" value="{{ case.uid }}">
+                        <button type="submit" class="btn-delete">Move to Trash</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+        <form action="/" method="get">
+            <button type="submit" class="btn-primary">Back to Home</button>
+        </form>
+    </div>
+</body>
+</html>
