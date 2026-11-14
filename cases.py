@@ -11,7 +11,7 @@ STATES = ("new", "running", "unsubscribed", "not_possible", "unclear")
 
 def case_key(message) -> str:
     """Message-ID of the mail in the collection mailbox; the UID changes when the mail is moved."""
-    mid = (message.get("Message-ID") or "").strip()
+    mid = str(message.get("Message-ID") or "").strip()
     if mid:
         return mid
     raw = "|".join(str(message.get(h, "")) for h in ("Date", "Subject", "From"))

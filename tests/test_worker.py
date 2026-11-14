@@ -307,14 +307,21 @@ def test_malformed_agent_result_ends_the_case_unclear(store, result):
     assert summary["handled"] == 1 and summary["error"] == ""
 
 
-def test_mail_with_non_ascii_message_id_does_not_stop_the_run(store):
-    raw = ("Message-ID: <näh@x>\nSubject: Fwd: x\nFrom: jens@wagnersnetz.de\n\n"
+def test_exception_while_handling_one_mail_does_not_stop_the_run(store):
+    raw = ("Message-ID: <broken@x>\nSubject: broken\nFrom: jens@wagnersnetz.de\n\n"
            "Von: news@shop.example\nAn: philipp@wagnersnetz.de\n\nhttps://shop.example/unsubscribe/9\n").encode("utf-8")
-    import email
-    with pytest.raises(Exception):
-        case_key(email.message_from_bytes(raw))   # proves the mail really is a poison pill
+
+    def parse_failing_on_one(message):
+        result = parse(message)
+        if result[0] == "broken":
+            raise ValueError("cannot handle this mail")
+        return result
+
     imap = FakeIMAP({b"1": raw, b"2": mail_bytes("<b@x>")})
-    summary = worker(store, imap, Agent(OK, OK)).run_once()
+    w = Worker(store, lambda: imap, parse_failing_on_one, Agent(OK), allowed_domains=("wagnersnetz.de",),
+               allowed_senders=("jens@wagnersnetz.de",))
+    summary = w.run_once()
+    assert store.get("<broken@x>") is None
     assert store.get("<b@x>")["state"] == "unsubscribed" and summary["error"] == ""
 
 

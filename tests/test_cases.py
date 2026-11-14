@@ -111,3 +111,12 @@ def test_meta_roundtrip(store):
     assert store.meta("paused", "0") == "0"
     store.set_meta("paused", "1")
     assert store.meta("paused") == "1"
+
+
+def test_key_copes_with_a_non_ascii_message_id():
+    import email
+    raw = "Message-ID: <näh@x>\r\nSubject: s\r\n\r\nbody".encode("utf-8")
+    message = email.message_from_bytes(raw)
+    key = case_key(message)
+    assert isinstance(key, str) and key
+    assert case_key(message) == key
