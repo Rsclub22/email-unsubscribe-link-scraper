@@ -23,7 +23,7 @@ class LLM:
         try:
             r = self._client.post(self._url, json=body, headers={"Authorization": f"Bearer {self._key}"},
                                   timeout=self._timeout)
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as e:     # InvalidURL is no HTTPError
             raise LLMUnavailable(f"model endpoint not reachable: {type(e).__name__}") from None
         if r.status_code != 200:
             raise LLMUnavailable(f"model endpoint answered {r.status_code}")

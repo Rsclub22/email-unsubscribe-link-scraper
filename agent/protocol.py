@@ -38,25 +38,39 @@ class Action:
     reason: str = ""
 
 
+_MARKER = re.compile(r"<\s*/?\s*page_text\s*>", re.IGNORECASE)
+_LINE_BREAKS = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
+
+
+def _clean(value) -> str:
+    """Page content without anything that looks like a page_text marker."""
+    return _MARKER.sub("", str(value or ""))
+
+
+def _line(value) -> str:
+    """Page content for a single prompt line: markers removed and line breaks collapsed, so it cannot forge lines."""
+    return _LINE_BREAKS.sub(" ", _clean(value))
+
+
 def _describe(e: dict) -> str:
-    line = f'[{e["n"]}] {e["tag"]}'
+    line = f'[{e["n"]}] {_line(e["tag"])}'
     if e.get("type"):
-        line += f' {e["type"]}'
-    line += f' "{e.get("label", "")}"'
+        line += f' {_line(e["type"])}'
+    line += f' "{_line(e.get("label", ""))}"'
     if "options" in e:
-        line += " options: " + " | ".join(e["options"])
+        line += " options: " + " | ".join(_line(o) for o in e["options"])
     if "checked" in e:
         line += " (checked)" if e["checked"] else " (not checked)"
     return line
 
 
 def build_prompt(title: str, url: str, text: str, elements: list[dict], history: list[str], has_address: bool) -> str:
-    clean = (text or "").replace("<page_text>", "").replace("</page_text>", "")
+    clean = _clean(text)
     parts = [
-        f"Page address: {url}",
-        f"Page title: {title}",
+        f"Page address: {_line(url)}",
+        f"Page title: {_line(title)}",
         "The address action is available." if has_address else "The address action is NOT available for this case.",
-        "Steps so far: " + ("; ".join(history) if history else "none"),
+        "Steps so far: " + ("; ".join(_line(h) for h in history) if history else "none"),
         "Elements:",
         "\n".join(_describe(e) for e in elements) if elements else "(none)",
         "<page_text>",
@@ -101,11 +115,11 @@ def parse_action(reply: str, elements: list[dict], has_address: bool) -> Action:
             raise ProtocolError("select needs a select element and one of its options")
         return Action("select", element=n, option=data["option"])
     if kind == "check":
-        if e["type"] not in ("checkbox", "radio") or type(data.get("on")) is not bool:
+        if e.get("type", "") not in ("checkbox", "radio") or type(data.get("on")) is not bool:
             raise ProtocolError("check needs a checkbox or radio button and on: true|false")
         return Action("check", element=n, on=data["on"])
     if not has_address:
         raise ProtocolError("no address is available for this case")
-    if not (e["tag"] == "textarea" or (e["tag"] == "input" and e["type"] in ("", "text", "email"))):
+    if not (e["tag"] == "textarea" or (e["tag"] == "input" and e.get("type", "") in ("", "text", "email"))):
         raise ProtocolError("address needs a text or e-mail input")
     return Action("address", element=n)

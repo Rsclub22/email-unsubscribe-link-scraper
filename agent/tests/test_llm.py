@@ -49,3 +49,9 @@ def test_error_text_never_contains_the_key():
     with pytest.raises(LLMUnavailable) as e:
         llm.ask("s", "u")
     assert "sk-secret" not in str(e.value)
+
+
+@pytest.mark.parametrize("base_url", ["https://ai.example:abc", "https://ai.ex\x00ample", "http://", "ai.example"])
+def test_invalid_endpoint_url_means_unavailable(base_url):
+    with pytest.raises(LLMUnavailable):
+        LLM(base_url, "m", "k", client=client(lambda r: httpx.Response(200, json={}))).ask("s", "u")
