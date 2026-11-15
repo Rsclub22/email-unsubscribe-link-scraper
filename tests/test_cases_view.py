@@ -52,6 +52,23 @@ def test_result_shows_cases_with_state_reason_evidence_and_links(unsub, monkeypa
     assert "2 mail(s) from senders that are not allowed" in html
 
 
+def test_result_still_lists_cases_when_the_inbox_scan_fails(unsub, monkeypatch):
+    from worker import ScanFailed
+    s = unsub.STORE
+    s.add("<no@x>", "Fwd: Bank", ["https://bank.example/u"], "")
+    s.claim("<no@x>")
+    s.finish("<no@x>", "not_possible", "login")
+
+    def failing():
+        raise ScanFailed("inbox scan failed")
+    monkeypatch.setattr(unsub, "scan_inbox", failing)
+    response = unsub.app.test_client().get("/result")
+    html = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "Fwd: Bank" in html and "The inbox could not be read" in html
+    assert 'name="email_id"' not in html and 'action="/retry"' not in html   # nothing is known about the mails
+
+
 def test_max_deferrals_default_and_from_environment(unsub, monkeypatch):
     import app
     assert unsub.WORKER.max_deferrals == 12

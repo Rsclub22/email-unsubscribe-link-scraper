@@ -221,6 +221,13 @@ def test_embedded_private_content_is_blocked_but_the_page_still_works(browser, s
     assert "http://192.168.8.111/pixel.gif" in refused     # the embedded request was made and refused
 
 
+def test_non_input_element_with_checkbox_type_is_not_a_page_error(browser, site):
+    llm = Script('{"action":"done","result":"unclear","reason":"seen"}')
+    r = run(browser, site, "/odd-type", llm)
+    assert r["reason"] != "page_error" and len(llm.prompts) == 1
+    assert '[1] button' in llm.prompts[0] and 'Abmelden bestätigen"' in llm.prompts[0]   # offered as an element
+
+
 def test_page_that_tampers_with_the_snapshot_ends_as_page_error_without_the_model(browser, site):
     llm = Script()
     r = run(browser, site, "/tamper-push", llm)

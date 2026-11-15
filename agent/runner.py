@@ -63,7 +63,7 @@ SNAPSHOT_JS = """
     else if (wrap && tag !== 'label') label = wrap.innerText + ' ' + label;
     const item = {n, tag, type, label: label.replace(/\\s+/g, ' ').trim().slice(0, maxLabel)};
     if (tag === 'select') item.options = Array.from(el.options).map(o => o.text.trim()).slice(0, maxOptions);
-    if (type === 'checkbox' || type === 'radio') item.checked = el.checked;
+    if (tag === 'input' && (type === 'checkbox' || type === 'radio')) item.checked = el.checked;
     elements.push(item);
   }
   const captcha = !!document.querySelector(

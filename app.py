@@ -24,7 +24,7 @@ from flask import Flask, abort, redirect, render_template, request, url_for
 
 from cases import CaseStore
 from oauth import MailboxOAuth, OAuthError, xoauth2_string
-from worker import AgentUnavailable, Worker, _tick, start_scheduler
+from worker import AgentUnavailable, ScanFailed, Worker, _tick, start_scheduler
 
 load_dotenv()  # optional .env for local runs
 
@@ -267,13 +267,17 @@ def result():
         finally:
             mail.logout()
         return render_template("result.html", links_data=links_data)
-    uids = scan_inbox()
+    try:
+        uids, scan_failed = scan_inbox(), False
+    except ScanFailed:   # show what is stored; without the inbox no mail can be offered for trash or retry
+        uids, scan_failed = {}, True
     cases = [dict(c, uid=uids[c["key"]].decode() if c["key"] in uids else "", label=STATE_LABELS[c["state"]])
              for c in STORE.all()]
     last = json.loads(STORE.meta("last_run", "{}"))
     at = STORE.meta("last_run_at")
     return render_template(
         "cases.html", cases=cases, last=last, agent=bool(AGENT_URL), paused=STORE.meta("paused") == "1",
+        scan_failed=scan_failed,
         last_at=datetime.datetime.fromtimestamp(int(at)).strftime("%Y-%m-%d %H:%M") if at else "never")
 
 

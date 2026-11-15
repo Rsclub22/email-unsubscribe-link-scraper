@@ -37,6 +37,8 @@ PAGES = {
                             "<form><input type='password' name='pw'><button>Abmelden</button></form>",
     "/frame-password": "<p>Abmelden</p><iframe src='/pwframe'></iframe><button>Abmelden bestätigen</button>",
     "/pwframe": "<form><input type='text' name='u'><input type='password' name='pw'></form>",
+    # a button that carries type=radio has no "checked" property of its own
+    "/odd-type": "<p>Bitte bestätigen</p><button type='radio'>Abmelden bestätigen</button>",
     # overrides Array.prototype.push, which the snapshot script uses, to plant a prompt marker in an element number
     "/tamper-push": "<p>Bitte bestätigen</p><button>Abmelden bestätigen</button><script>"
                     "const push = Array.prototype.push; Array.prototype.push = function (...items) {"

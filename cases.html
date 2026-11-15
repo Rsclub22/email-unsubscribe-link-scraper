@@ -16,6 +16,7 @@
             {% if last.get('deferred') %}{{ last['deferred'] }} case(s) waiting for the model.{% endif %}{% endif %}
         </p>
         {% if last.get('error') %}<p class="error">Last run: {{ last['error'] }}</p>{% endif %}
+        {% if scan_failed %}<p class="error">The inbox could not be read: the list shows the stored cases only.</p>{% endif %}
         {% if not agent %}<p class="error">The agent is switched off: cases are listed, nothing is unsubscribed automatically.</p>{% endif %}
         <form action="{{ url_for('run_now') }}" method="post">
             <button type="submit" class="btn-primary">Run now</button>
