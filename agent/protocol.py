@@ -38,17 +38,24 @@ class Action:
     reason: str = ""
 
 
-_MARKER = re.compile(r"<\s*/?\s*page_text\s*>", re.IGNORECASE)
 _LINE_BREAKS = re.compile(r"[\r\n\v\f\x1c-\x1e\x85\u2028\u2029]+")
+_BRACKETS = str.maketrans({"<": "\u2039", ">": "\u203a"})
 
 
 def _clean(value) -> str:
-    """Page content without anything that looks like a page_text marker."""
-    return _MARKER.sub("", str(value or ""))
+    """Page content with every < and > replaced by \u2039 and \u203a: it cannot write a <page_text> marker in any
+    spelling, so the only markers in the prompt are the two this module writes."""
+    return str(value or "").translate(_BRACKETS)
+
+
+def _history_line(value) -> str:
+    """A history entry is written by this module's caller but may echo the model's reply: < is replaced (no marker
+    can be written without it), > stays so the entries' own "->" remain readable."""
+    return _LINE_BREAKS.sub(" ", str(value or "").replace("<", "\u2039"))
 
 
 def _line(value) -> str:
-    """Page content for a single prompt line: markers removed and line breaks collapsed, so it cannot forge lines."""
+    """Page content for a single prompt line: brackets defused and line breaks collapsed, so it cannot forge lines."""
     return _LINE_BREAKS.sub(" ", _clean(value))
 
 
@@ -70,7 +77,7 @@ def build_prompt(title: str, url: str, text: str, elements: list[dict], history:
         f"Page address: {_line(url)}",
         f"Page title: {_line(title)}",
         "The address action is available." if has_address else "The address action is NOT available for this case.",
-        "Steps so far: " + ("; ".join(_line(h) for h in history) if history else "none"),
+        "Steps so far: " + ("; ".join(_history_line(h) for h in history) if history else "none"),
         "Elements:",
         "\n".join(_describe(e) for e in elements) if elements else "(none)",
         "<page_text>",

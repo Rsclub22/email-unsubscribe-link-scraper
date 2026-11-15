@@ -1,8 +1,6 @@
 """The browser loop against imitated unsubscribe pages. Needs Playwright: run with tests/run-in-docker.sh."""
 
 import logging
-import os
-import tempfile
 import time
 from urllib.parse import quote
 
@@ -63,7 +61,7 @@ def other():
 
 def local_ok(base):
     """Guard for the tests: the test server on 127.0.0.1 counts as public, everything else goes to the real guard."""
-    return lambda url: url.startswith(base) or guard.is_public_url(url)
+    return lambda url: url.startswith(base + "/") or guard.is_public_url(url)
 
 
 def local_addresses(base):
@@ -221,23 +219,15 @@ def test_embedded_private_content_is_blocked_but_the_page_still_works(browser, s
     assert run(browser, site, "/embeds-private", Confirm())["result"] == "unsubscribed"
 
 
-def _files_with(content: bytes) -> set[str]:
-    """Every file below the temp directory (where Playwright keeps downloads) whose content is exactly content."""
-    found = set()
-    for root, _, files in os.walk(tempfile.gettempdir()):
-        for name in files:
-            path = os.path.join(root, name)
-            try:
-                if os.path.getsize(path) == len(content) and open(path, "rb").read() == content:
-                    found.add(path)
-            except OSError:
-                pass
-    return found
-
-
-def test_download_is_not_kept(browser, site, tmp_path, caplog):
+def test_download_is_not_kept(browser, site, tmp_path, caplog, monkeypatch):
     caplog.set_level(logging.INFO, logger="runner")
-    before = _files_with(b"data")
+    contexts = []
+    real_new_context = browser.new_context
+
+    def spy(**kw):
+        contexts.append(kw)
+        return real_new_context(**kw)
+    monkeypatch.setattr(browser, "new_context", spy)
 
     class Download(Script):
         def ask(self, system, user):
@@ -250,7 +240,7 @@ def test_download_is_not_kept(browser, site, tmp_path, caplog):
     assert r["result"] == "unclear"
     assert ("GET", "/file.bin", {}) in sites.Handler.log            # the download really was attempted
     assert "download refused" in caplog.text                         # the browser offered it and it was refused
-    assert _files_with(b"data") - before == set()                    # and no file with its content appeared
+    assert [kw.get("accept_downloads") for kw in contexts] == [False]   # and the context never accepts downloads
 
 
 def test_model_unavailable_is_an_error_not_a_result(browser, site):
@@ -273,8 +263,10 @@ def test_page_that_does_not_load_is_a_page_error(browser, site):
 
 def test_redirect_to_loopback_never_leaves_the_proxy(browser, site, other):
     base2, log2 = other
-    r = run(browser, site, "/redirect?to=" + quote(base2 + "/admin"), Script())
+    refused = []
+    r = run(browser, site, "/redirect?to=" + quote(base2 + "/admin"), Script(), blocked_log=refused)
     assert log2 == []
+    assert base2 + "/admin" in refused                  # the hop was made and refused, not just not followed
     assert (r["result"], r["reason"]) == ("not_possible", "blocked_address")
 
 
@@ -285,9 +277,11 @@ def test_subresources_to_loopback_never_reach_it(browser, site, other, page, via
     target = base2 + "/pixel.gif"
     if via_redirect:                 # the route gate sees only the first hop; the proxy must stop the second
         target = site + "/redirect?to=" + quote(target)
-    run(browser, site, page + quote(target), Script())
+    refused = []
+    run(browser, site, page + quote(target), Script(), blocked_log=refused)
     time.sleep(0.5)
     assert log2 == []
+    assert base2 + "/pixel.gif" in refused              # the request to the second server was made and refused
     if via_redirect:
         assert ("GET", "/redirect", {}) in sites.Handler.log      # the first hop did go out
 
@@ -337,3 +331,35 @@ def test_password_field_anywhere_ends_without_the_model(browser, site, path):
     llm = Script()
     r = run(browser, site, path, llm)
     assert (r["result"], r["reason"]) == ("not_possible", "login") and llm.prompts == []
+
+
+def test_port_prefix_of_the_test_server_is_not_the_test_server(site):
+    host, port = site.rsplit(":", 1)
+    longer = f"{host}:{port}1/"
+    assert local_ok(site)(site + "/x") and local_addresses(site)(site + "/x") == ["127.0.0.1"]
+    assert not local_ok(site)(longer) and local_addresses(site)(longer) == []
+
+
+def test_hang_while_creating_the_context_ends_at_the_time_budget(browser, site):
+    own = browser.browser_type.launch(args=BROWSER_ARGS)     # this browser gets closed by the watchdog
+    real_new_context = own.new_context
+
+    def hanging_new_context(**kw):
+        # stands in for a new_context that never returns: Playwright round trips for up to 30 s, which only a
+        # watchdog already armed can cut short (by closing the browser)
+        until = time.monotonic() + 30
+        while time.monotonic() < until:
+            real_new_context().close()
+        return real_new_context(**kw)
+    own.new_context = hanging_new_context
+    llm = Script()
+    start = time.monotonic()
+    try:
+        r = run(browser=own, site=site, path="/confirm", llm=llm, case_timeout=2)
+    finally:
+        try:
+            own.close()
+        except Exception:
+            pass
+    assert time.monotonic() - start < 15
+    assert (r["result"], r["reason"]) == ("not_possible", "budget") and llm.prompts == []

@@ -146,24 +146,26 @@ def _report_close(future) -> None:
 
 class _Watchdog:
     """Hard wall clock for one case. Playwright's sync API may only be used from its own thread, so the timer
-    schedules the context's close on Playwright's event loop; a call that hangs in the page (an endless script
-    blocks page.evaluate forever) then fails at once, and the case ends with budget."""
+    schedules a close on Playwright's event loop: of the case's browser context, or of the whole browser while the
+    context does not exist yet. A call that hangs (an endless script blocks page.evaluate forever, or new_context
+    never returns) then fails at once, and the case ends with budget."""
 
-    def __init__(self, seconds: float):
+    def __init__(self, seconds: float, browser):
         self.expired = threading.Event()
-        self._context = None
+        self.context = None             # set once created; until then the browser is closed instead
+        self._browser = browser
         self._timer = threading.Timer(seconds, self._fire)
         self._timer.daemon = True
 
-    def watch(self, context) -> None:
-        self._context = context
+    def start(self) -> None:
         self._timer.start()
 
     def _fire(self) -> None:
         self.expired.set()
+        target = self.context if self.context is not None else self._browser
         try:
             # private parts of Playwright 1.65 (pinned): the async implementation object and its event loop
-            future = asyncio.run_coroutine_threadsafe(self._context._impl_obj.close(None), self._context._loop)
+            future = asyncio.run_coroutine_threadsafe(target._impl_obj.close(None), target._loop)
         except Exception as e:
             logger.warning("watchdog could not close the browser context: %s", type(e).__name__)
             return
@@ -174,17 +176,20 @@ class _Watchdog:
 
 
 def run_case(browser, url: str, address: str, llm, *, max_steps: int = 20, case_timeout: float = 300,
-             nav_timeout: float = 30, url_ok=is_public_url, addresses_for=public_addresses, clock=time.monotonic) -> dict:
+             nav_timeout: float = 30, url_ok=is_public_url, addresses_for=public_addresses, clock=time.monotonic,
+             blocked_log: list | None = None) -> dict:
     """Try to unsubscribe at url. Returns result unsubscribed | not_possible | unclear | error with a reason.
 
     url_ok checks the start address, every request the route gate sees and the page address after each step.
     addresses_for is the egress proxy's check: the addresses a URL may be reached at ([] = refused); the proxy
-    connects only to those. Both must agree on what is allowed.
+    connects only to those. Both must agree on what is allowed. blocked_log, if given, receives every refused
+    URL (route gate and proxy), for tests and diagnostics; it is not part of the result.
     """
     if not url_ok(url):
         return _result("not_possible", "blocked_address")
     deadline = clock() + case_timeout
-    watchdog = _Watchdog(case_timeout + WATCHDOG_MARGIN)
+    watchdog = _Watchdog(case_timeout + WATCHDOG_MARGIN, browser)
+    watchdog.start()                  # armed before anything that could hang, new_context included
     steps = 0
 
     def over() -> bool:
@@ -193,18 +198,22 @@ def run_case(browser, url: str, address: str, llm, *, max_steps: int = 20, case_
     def budget(evidence: str = "", evidence_url: str = "") -> dict:
         return _result("not_possible", "budget", evidence, evidence_url, steps, 2 if steps else 1)
 
-    blocked: list[str] = []           # every refused URL (route gate and proxy)
+    blocked: list[str] = blocked_log if blocked_log is not None else []   # every refused URL (gate and proxy)
     main_navigation: list[str] = []   # URLs of the main frame's navigation requests, redirect hops included
     main_blocked = threading.Event()  # the route gate refused a main-frame navigation
     # Every request leaves through the egress proxy, which checks also redirect hops and tunnels;
     # the route gate below sees only the first request of each redirect chain, but with the full https URL.
-    proxy = EgressProxy(addresses_for, blocked, timeout=nav_timeout).start()
+    proxy = EgressProxy(addresses_for, blocked, timeout=nav_timeout, lifetime=case_timeout + WATCHDOG_MARGIN).start()
     context = None
     page = None
     try:
+        # Loopback requests (127.0.0.1, localhost, ::1) reach the proxy only because Playwright forces Chromium to
+        # proxy loopback for context proxies (its shouldProxyLoopback default). Never pass a "bypass" list here,
+        # and server.py refuses to start with PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK set. Guarded by
+        # test_redirect_to_loopback_never_leaves_the_proxy and test_subresources_to_loopback_never_reach_it.
         context = browser.new_context(accept_downloads=False, service_workers="block",
                                       proxy={"server": proxy.address})
-        watchdog.watch(context)
+        watchdog.context = context
         context.add_init_script(NO_WEBRTC_JS)
 
         def is_main_navigation(request) -> bool:

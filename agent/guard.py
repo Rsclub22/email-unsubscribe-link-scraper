@@ -7,11 +7,16 @@ from urllib.parse import urlsplit
 
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 _IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
-# IPv6 transition ranges that tunnel to an IPv4 host we cannot judge from here (6to4, Teredo): refused outright.
-_TUNNELS = (ipaddress.ip_network("2002::/16"), ipaddress.ip_network("2001::/32"))
+_IPV4_TRANSLATED = ipaddress.ip_network("::ffff:0:0:0/96")
+# IPv6 transition ranges that tunnel to an IPv4 host we cannot judge from here (6to4, Teredo), and ranges that
+# some Python versions (3.12) still call global: site-local, documentation (3fff::/20), SRv6 SIDs. Refused outright.
+_REFUSED_V6 = tuple(ipaddress.ip_network(n) for n in ("2002::/16", "2001::/32", "fec0::/10", "3fff::/20", "5f00::/16"))
 
 
-def _parse_blocked_nets(value: str) -> tuple:
+def parse_blocked_nets(value: str) -> tuple:
+    """Comma-separated CIDRs; "none" (or nothing) means no site networks. Raises ValueError naming BLOCKED_NETS."""
+    if value.strip().lower() == "none":
+        return ()
     nets = []
     for entry in value.split(","):
         entry = entry.strip()
@@ -25,8 +30,9 @@ def _parse_blocked_nets(value: str) -> tuple:
 
 
 # Site-specific networks that look public but must not be reached (for example the homelab's own container
-# network). Comma-separated CIDRs, read once at start-up; an invalid entry stops the start.
-BLOCKED_NETS = _parse_blocked_nets(os.environ.get("BLOCKED_NETS", ""))
+# network). Comma-separated CIDRs or "none", read once at import; an invalid entry stops the start. The agent
+# service insists on an explicit value (server.py); unset here means none, so pure users can import the module.
+BLOCKED_NETS = parse_blocked_nets(os.environ.get("BLOCKED_NETS", ""))
 
 
 def _resolve(host: str) -> list[str]:
@@ -34,10 +40,11 @@ def _resolve(host: str) -> list[str]:
 
 
 def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
-    """The IPv4 address inside ::ffff:a.b.c.d, ::a.b.c.d and 64:ff9b::a.b.c.d (NAT64); None for other IPv6."""
+    """The IPv4 address inside ::ffff:a.b.c.d, ::ffff:0:a.b.c.d, ::a.b.c.d and 64:ff9b::a.b.c.d (NAT64); None for
+    other IPv6."""
     if ip.ipv4_mapped is not None:
         return ip.ipv4_mapped
-    if ip in _NAT64 or (ip in _IPV4_COMPATIBLE and int(ip) > 1):    # :: and ::1 stay IPv6 (both not global)
+    if ip in _NAT64 or ip in _IPV4_TRANSLATED or (ip in _IPV4_COMPATIBLE and int(ip) > 1):    # :: and ::1 stay IPv6 (both not global)
         return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
     return None
 
@@ -45,7 +52,7 @@ def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
 def _is_global(address: str, blocked: tuple) -> bool:
     ip = ipaddress.ip_address(address.split("%", 1)[0])
     if isinstance(ip, ipaddress.IPv6Address):
-        if any(ip in net for net in _TUNNELS):
+        if any(ip in net for net in _REFUSED_V6):
             return False
         ip = _embedded_ipv4(ip) or ip
     if any(ip.version == net.version and ip in net for net in blocked):

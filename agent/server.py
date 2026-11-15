@@ -3,10 +3,12 @@
 import logging
 import os
 import threading
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, request
 from playwright.sync_api import sync_playwright
 
+import guard
 from llm import LLM
 from runner import BROWSER_ARGS, CODE_REASONS, run_case
 
@@ -22,7 +24,29 @@ def _required(name: str) -> str:
     return value
 
 
-MODEL = LLM(_required("LLM_BASE_URL"), _required("LLM_MODEL"), _required("LLM_API_KEY"))   # one at a time: shared
+def _model_url() -> str:
+    url = _required("LLM_BASE_URL")
+    try:
+        parts = urlsplit(url)
+        valid = parts.scheme in ("http", "https") and bool(parts.hostname)
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RuntimeError("LLM_BASE_URL must be an http(s) URL with a host")
+    return url
+
+
+# Playwright makes Chromium send loopback requests through the context proxy unless this variable is set; the
+# egress proxy relies on that (runner.py), so the service refuses to run with it.
+_LOOPBACK_SWITCH = "PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK"
+if _LOOPBACK_SWITCH in os.environ:
+    raise RuntimeError(f"{_LOOPBACK_SWITCH} is set: loopback requests would bypass the egress proxy")
+
+# Site networks must be stated explicitly ("none" for none): a forgotten variable must not open them.
+guard.BLOCKED_NETS = guard.parse_blocked_nets(_required("BLOCKED_NETS"))
+logger.info("%d site network(s) blocked", len(guard.BLOCKED_NETS))
+
+MODEL = LLM(_model_url(), _required("LLM_MODEL"), _required("LLM_API_KEY"))   # one case at a time: shared
 MAX_STEPS = int(os.environ.get("MAX_STEPS", "20"))
 CASE_TIMEOUT = float(os.environ.get("CASE_TIMEOUT", "300"))
 

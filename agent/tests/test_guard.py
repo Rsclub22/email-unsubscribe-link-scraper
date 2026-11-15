@@ -47,8 +47,15 @@ def test_private_and_special_addresses_fail(ip, blocked):
 @pytest.mark.parametrize("ip", [
     "::127.0.0.1", "::192.168.8.111", "::10.0.0.1",                    # IPv4-compatible (::/96)
     "64:ff9b::7f00:1", "64:ff9b::c0a8:86f", "64:ff9b::a00:1",           # NAT64 (64:ff9b::/96) to private IPv4
-    "2002:5db8:d822::1", "2002:c0a8:86f::1",                            # 6to4 (2002::/16), even of a public IPv4
-    "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001::1"])                 # Teredo (2001::/32)
+    # 6to4 (2002::/16) and Teredo (2001::/32): ipaddress already calls these non-global, so these cases pass
+    # even without guard._TUNNELS; the explicit list keeps them refused should a Python version change that.
+    "2002:5db8:d822::1", "2002:c0a8:86f::1",                            # 6to4, even of a public IPv4
+    "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001::1",                  # Teredo
+    # global for ipaddress on Python 3.12, refused explicitly:
+    "fec0::1", "feff::1",                                               # site-local (fec0::/10)
+    "3fff::1", "3fff:fff::1",                                           # documentation (3fff::/20)
+    "5f00::1", "5f00:ffff::1",                                          # SRv6 SIDs (5f00::/16)
+    "::ffff:0:c0a8:86f", "::ffff:0:7f00:1"])                            # IPv4-translated (::ffff:0:0:0/96)
 def test_ipv6_forms_with_embedded_or_tunnelled_ipv4_fail(ip):
     assert is_public_url(f"http://[{ip}]/", resolver({ip: [ip]})) is False
 
@@ -62,6 +69,12 @@ def test_embedded_ipv4_is_judged_by_the_ipv4_rules_including_site_networks():
     nat64 = "64:ff9b::ac3c:7f"       # 172.60.0.127 behind NAT64
     assert is_public_url(f"http://[{nat64}]/", resolver({nat64: [nat64]})) is True
     assert is_public_url(f"http://[{nat64}]/", resolver({nat64: [nat64]}), blocked=SITE_NETS) is False
+
+
+def test_ipv4_translated_address_is_judged_by_its_ipv4_address():
+    public, site = "::ffff:0:5db8:d822", "::ffff:0:ac3c:7f"       # 93.184.216.34 and 172.60.0.127
+    assert is_public_url(f"http://[{public}]/", resolver({public: [public]})) is True
+    assert is_public_url(f"http://[{site}]/", resolver({site: [site]}), blocked=SITE_NETS) is False
 
 
 def test_public_addresses_returns_the_checked_addresses_or_nothing():
@@ -94,20 +107,21 @@ def reload_guard(monkeypatch):
 
 
 def test_blocked_nets_default_comes_from_the_environment(reload_guard):
-    g = reload_guard("172.60.0.0/16, 198.51.100.0/24")
+    g = reload_guard(" 172.60.0.0/16 ,198.51.100.0/24 ")
     assert g.BLOCKED_NETS == (ip_network("172.60.0.0/16"), ip_network("198.51.100.0/24"))
     assert g.is_public_url("https://site.example/", resolver({"site.example": ["172.60.0.127"]})) is False
     assert g.is_public_url("https://site.example/", resolver({"site.example": ["93.184.216.34"]})) is True
 
 
-@pytest.mark.parametrize("value", [None, "", " , "])
+@pytest.mark.parametrize("value", [None, "", " , ", "none", " none ", "NONE"])
 def test_blocked_nets_empty_or_unset_blocks_nothing_extra(reload_guard, value):
     g = reload_guard(value)
     assert g.BLOCKED_NETS == ()
     assert g.is_public_url("https://site.example/", resolver({"site.example": ["172.60.0.127"]})) is True
 
 
-@pytest.mark.parametrize("value", ["172.60.0.0/33", "not-a-net", "172.60.0.1/16", "10.0.0.0/8,garbage"])
+@pytest.mark.parametrize("value", ["172.60.0.0/33", "not-a-net", "172.60.0.1/16", "10.0.0.0/8,garbage",
+                                   "none,10.0.0.0/8", "10.0.0.0/8,none"])
 def test_invalid_blocked_nets_fail_the_start(reload_guard, value):
     with pytest.raises(ValueError, match="BLOCKED_NETS"):
         reload_guard(value)

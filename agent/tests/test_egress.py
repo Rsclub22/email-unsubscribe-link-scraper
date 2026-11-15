@@ -344,3 +344,69 @@ def test_switching_protocols_is_not_passed_on(upstreams, proxy_for):
     addresses_for = allow((f"http://127.0.0.1:{up.port}/", "127.0.0.1"))
     reply = exchange(proxy_for(addresses_for), f"GET http://127.0.0.1:{up.port}/ HTTP/1.1\r\nHost: x\r\n\r\n".encode())
     assert reply == b""
+
+
+# --- limits: interim answers and connection lifetime --------------------------------------------------------------
+
+@pytest.mark.parametrize("interim,answered", [(5, True), (6, False)])
+def test_at_most_five_interim_answers(upstreams, proxy_for, interim, answered):
+    up = upstreams(reply=b"HTTP/1.1 100 Continue\r\n\r\n" * interim + OK_REPLY)
+    addresses_for = allow((f"http://127.0.0.1:{up.port}/", "127.0.0.1"))
+    reply = exchange(proxy_for(addresses_for), f"GET http://127.0.0.1:{up.port}/ HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+    assert reply == (b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok" if answered else b"")
+
+
+def test_connection_ends_at_its_lifetime_even_while_bytes_trickle():
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    port = server.getsockname()[1]
+    upstream_closed = threading.Event()
+
+    def trickle():
+        conn, _ = server.accept()
+        with conn:
+            conn.recv(65536)
+            try:
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n")
+                for _ in range(100):          # one byte every 0.2 s: never idle long enough for the socket timeout
+                    conn.sendall(b"x")
+                    time.sleep(0.2)
+            except OSError:
+                upstream_closed.set()
+
+    threading.Thread(target=trickle, daemon=True).start()
+    proxy = EgressProxy(lambda url: ["127.0.0.1"], [], timeout=3, lifetime=1).start()
+    try:
+        start = time.monotonic()
+        reply = exchange(proxy, f"GET http://127.0.0.1:{port}/ HTTP/1.1\r\nHost: x\r\n\r\n".encode(), wait=10)
+        elapsed = time.monotonic() - start
+    finally:
+        proxy.stop()
+        server.close()
+    assert reply.startswith(b"HTTP/1.1 200 OK") and len(reply) < 200
+    assert elapsed < 2
+    assert upstream_closed.wait(2)        # the upstream side was closed too, not left to the daemon thread
+
+
+def test_tunnel_ends_at_its_lifetime(upstreams):
+    up = upstreams(echo=True)
+    proxy = EgressProxy(lambda url: ["127.0.0.1"], [], timeout=3, lifetime=1).start()
+    try:
+        port = int(proxy.address.rsplit(":", 1)[1])
+        with socket.create_connection(("127.0.0.1", port)) as s:
+            s.settimeout(5)
+            s.sendall(f"CONNECT tunnel.example:{up.port} HTTP/1.1\r\n\r\n".encode())
+            assert s.recv(1024).startswith(b"HTTP/1.1 200")
+            start = time.monotonic()
+            while True:                        # keep the tunnel busy; the lifetime must still end it
+                try:
+                    s.sendall(b"ping")
+                    if not s.recv(1024):
+                        break
+                except OSError:
+                    break
+                time.sleep(0.1)
+            assert time.monotonic() - start < 2
+    finally:
+        proxy.stop()

@@ -3,16 +3,28 @@ Needs Playwright and Flask for the import: run with tests/run-in-docker.sh."""
 
 import importlib
 import logging
+from ipaddress import ip_network
 
 import pytest
+
+import guard
 
 pytest.importorskip("playwright.sync_api")
 pytest.importorskip("flask")
 
-ENV = {"LLM_BASE_URL": "https://ai.example", "LLM_MODEL": "deepseek-chat", "LLM_API_KEY": "sk-test"}
+ENV = {"LLM_BASE_URL": "https://ai.example", "LLM_MODEL": "deepseek-chat", "LLM_API_KEY": "sk-test",
+       "BLOCKED_NETS": "none"}
+LOOPBACK_SWITCH = "PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK"
 KEYS = ["evidence", "evidence_url", "reason", "result", "stage", "steps"]
 URL = "https://shop.example/u?token=secret"
 ADDRESS = "anne@wagnersnetz.de"
+
+
+@pytest.fixture(autouse=True)
+def keep_guard(monkeypatch):
+    """server sets guard.BLOCKED_NETS at import; put the value back after each test."""
+    monkeypatch.setattr(guard, "BLOCKED_NETS", guard.BLOCKED_NETS)
+    monkeypatch.delenv(LOOPBACK_SWITCH, raising=False)
 
 
 @pytest.fixture
@@ -21,6 +33,19 @@ def server(monkeypatch):
         monkeypatch.setenv(k, v)
     import server as module
     return importlib.reload(module)
+
+
+def reload_with(monkeypatch, **env):
+    """Reload server with ENV changed by env (None removes a variable); afterwards reload it with ENV again."""
+    for k, v in ENV.items():
+        monkeypatch.setenv(k, v)
+    import server as module
+    for k, v in env.items():
+        if v is None:
+            monkeypatch.delenv(k, raising=False)
+        else:
+            monkeypatch.setenv(k, v)
+    return module
 
 
 @pytest.fixture
@@ -121,3 +146,72 @@ def test_missing_model_configuration_stops_the_start(monkeypatch, missing, value
     finally:
         monkeypatch.setenv(missing, ENV[missing])
         importlib.reload(module)
+
+
+def test_without_blocked_nets_the_service_does_not_start(monkeypatch):
+    module = reload_with(monkeypatch, BLOCKED_NETS=None)
+    try:
+        with pytest.raises(RuntimeError, match="BLOCKED_NETS"):
+            importlib.reload(module)
+    finally:
+        monkeypatch.setenv("BLOCKED_NETS", "none")
+        importlib.reload(module)
+
+
+@pytest.mark.parametrize("value", ["none", " NONE "])
+def test_blocked_nets_none_means_no_site_networks(monkeypatch, caplog, value):
+    module = reload_with(monkeypatch, BLOCKED_NETS=value)
+    caplog.set_level(logging.INFO)
+    importlib.reload(module)
+    assert guard.BLOCKED_NETS == ()
+    assert "0 site network(s) blocked" in caplog.text
+
+
+def test_blocked_nets_are_given_to_the_guard_and_only_counted_in_the_log(monkeypatch, caplog):
+    module = reload_with(monkeypatch, BLOCKED_NETS="172.60.0.0/16,10.99.0.0/16")
+    caplog.set_level(logging.INFO)
+    importlib.reload(module)
+    assert guard.BLOCKED_NETS == (ip_network("172.60.0.0/16"), ip_network("10.99.0.0/16"))
+    assert guard.is_public_url("http://site.example/", lambda host: ["172.60.0.127"]) is False
+    assert guard.is_public_url("http://site.example/", lambda host: ["93.184.216.34"]) is True
+    assert "2 site network(s) blocked" in caplog.text and "172.60" not in caplog.text
+
+
+@pytest.mark.parametrize("value", ["garbage", "172.60.0.0/33", "none,10.0.0.0/8"])
+def test_invalid_blocked_nets_stop_the_start(monkeypatch, value):
+    module = reload_with(monkeypatch, BLOCKED_NETS=value)
+    try:
+        with pytest.raises((RuntimeError, ValueError), match="BLOCKED_NETS"):
+            importlib.reload(module)
+    finally:
+        monkeypatch.setenv("BLOCKED_NETS", "none")
+        importlib.reload(module)
+
+
+@pytest.mark.parametrize("value", ["1", "", "0"])
+def test_switch_that_stops_proxying_loopback_stops_the_start(monkeypatch, value):
+    module = reload_with(monkeypatch, **{LOOPBACK_SWITCH: value})
+    try:
+        with pytest.raises(RuntimeError, match=LOOPBACK_SWITCH):
+            importlib.reload(module)
+    finally:
+        monkeypatch.delenv(LOOPBACK_SWITCH)
+        importlib.reload(module)
+
+
+@pytest.mark.parametrize("value", ["ai.example", "ftp://ai.example", "https://", "http:///api", "//ai.example",
+                                   "https://user@"])
+def test_model_url_must_be_http_with_a_host(monkeypatch, value):
+    module = reload_with(monkeypatch, LLM_BASE_URL=value)
+    try:
+        with pytest.raises(RuntimeError, match="LLM_BASE_URL"):
+            importlib.reload(module)
+    finally:
+        monkeypatch.setenv("LLM_BASE_URL", ENV["LLM_BASE_URL"])
+        importlib.reload(module)
+
+
+@pytest.mark.parametrize("value", ["http://open-webui:8080", "https://ai.example/base/"])
+def test_model_url_with_http_and_host_is_accepted(monkeypatch, value):
+    module = reload_with(monkeypatch, LLM_BASE_URL=value)
+    assert importlib.reload(module).MODEL is not None

@@ -16,6 +16,7 @@ import threading
 from urllib.parse import urlsplit
 
 MAX_HEADER_LINES = 100
+MAX_INTERIM = 5             # interim 1xx answers before the final one; more and the request fails
 MAX_LINE = 16384
 HOP_BY_HOP = {"connection", "proxy-connection", "keep-alive", "proxy-authorization", "proxy-authenticate", "te",
               "trailer", "upgrade"}
@@ -123,6 +124,25 @@ class _Handler(socketserver.StreamRequestHandler):
     connection could otherwise carry the browser's next request, meant for another host, to this upstream."""
 
     def handle(self):
+        # timeout limits each socket operation; the lifetime limits the whole connection, so a peer that trickles
+        # bytes cannot keep this thread and its sockets alive after the case
+        self._sockets = [self.connection]
+        timer = threading.Timer(self.server.egress.lifetime, self._expire)
+        timer.daemon = True
+        timer.start()
+        try:
+            self._handle()
+        finally:
+            timer.cancel()
+
+    def _expire(self) -> None:
+        for sock in list(self._sockets):
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def _handle(self):
         proxy = self.server.egress
         self.connection.settimeout(proxy.timeout)
         head = _read_head(self.rfile)
@@ -157,6 +177,7 @@ class _Handler(socketserver.StreamRequestHandler):
         upstream = self._open(addresses, port, proxy.timeout)
         if upstream is None:
             return
+        self._sockets.append(upstream)
         with upstream:
             if method == "CONNECT":
                 self._tunnel(upstream, proxy.timeout)
@@ -190,7 +211,7 @@ class _Handler(socketserver.StreamRequestHandler):
             upstream.sendall(chunk)
             length -= len(chunk)
         ufile = upstream.makefile("rb")
-        while True:
+        for _ in range(MAX_INTERIM + 1):
             head = _read_head(ufile)
             if not head:
                 return
@@ -200,6 +221,8 @@ class _Handler(socketserver.StreamRequestHandler):
                 return      # no protocol switches: the Upgrade header was not passed on, so this is not ours
             if not (len(code) == 3 and code.startswith("1")):
                 break       # interim 1xx answers (100 Continue, 103 Early Hints) are dropped; the final one counts
+        else:
+            return          # only interim answers: no final one within the limit
         try:
             response_headers = _keep(_headers(head[1:]))
         except ValueError:
@@ -221,10 +244,11 @@ class _Server(socketserver.ThreadingTCPServer):
 class EgressProxy:
     """Proxy on 127.0.0.1 with a random port, between start() and stop(). Refused URLs are appended to blocked."""
 
-    def __init__(self, addresses_for, blocked: list, timeout: float = 30):
+    def __init__(self, addresses_for, blocked: list, timeout: float = 30, lifetime: float = 300):
         self.addresses_for = addresses_for
         self.blocked = blocked
-        self.timeout = timeout
+        self.timeout = timeout          # per socket operation
+        self.lifetime = lifetime        # per client connection, from accept to close
         self._server = _Server(("127.0.0.1", 0), _Handler)
         self._server.egress = self
         self.address = f"http://127.0.0.1:{self._server.server_address[1]}"
