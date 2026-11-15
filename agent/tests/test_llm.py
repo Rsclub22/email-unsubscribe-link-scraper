@@ -55,3 +55,16 @@ def test_error_text_never_contains_the_key():
 def test_invalid_endpoint_url_means_unavailable(base_url):
     with pytest.raises(LLMUnavailable):
         LLM(base_url, "m", "k", client=client(lambda r: httpx.Response(200, json={}))).ask("s", "u")
+
+
+@pytest.mark.parametrize("given,expected", [(None, 60), (5.5, 5.5), (120, 60)])
+def test_timeout_can_be_capped_per_call_but_never_raised(given, expected):
+    seen = {}
+
+    def handler(request):
+        seen["timeout"] = request.extensions["timeout"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "x"}}]})
+
+    llm = LLM("https://ai.example", "m", "k", timeout=60, client=client(handler))
+    llm.ask("s", "u") if given is None else llm.ask("s", "u", timeout=given)
+    assert seen["timeout"] == {"connect": expected, "read": expected, "write": expected, "pool": expected}

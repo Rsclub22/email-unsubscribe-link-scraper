@@ -15,14 +15,17 @@ class LLM:
         self._timeout = timeout
         self._client = client or httpx.Client()
 
-    def ask(self, system: str, user: str) -> str:
+    def ask(self, system: str, user: str, timeout: float | None = None) -> str:
+        """The model's reply text. timeout (seconds) can only shorten the configured one, for example to the
+        remaining budget of a case."""
+        timeout = self._timeout if timeout is None else min(timeout, self._timeout)
         body = {
             "model": self._model, "stream": False, "temperature": 0,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         }
         try:
             r = self._client.post(self._url, json=body, headers={"Authorization": f"Bearer {self._key}"},
-                                  timeout=self._timeout)
+                                  timeout=timeout)
         except (httpx.HTTPError, httpx.InvalidURL, ValueError) as e:     # InvalidURL is no HTTPError
             raise LLMUnavailable(f"model endpoint not reachable: {type(e).__name__}") from None
         if r.status_code != 200:

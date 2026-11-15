@@ -4,5 +4,6 @@
 set -eu
 # --load: with a docker-container buildx builder the image would otherwise stay in the build cache only
 docker build -q --load -t unsubscriber-agent-test agent >/dev/null
-docker run --rm --network none --user pwuser -v "$PWD/agent/tests:/app/tests:ro" unsubscriber-agent-test \
+# --init: python would be PID 1 and ignore SIGTERM, so a hanging run could not be stopped
+docker run --init --rm --network none --user pwuser -v "$PWD/agent/tests:/app/tests:ro" unsubscriber-agent-test \
   python -m pytest -q -p no:cacheprovider /app/tests

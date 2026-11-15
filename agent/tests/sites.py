@@ -1,6 +1,8 @@
 """Tiny web server with imitated unsubscribe pages for the browser tests."""
 
+import html
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -27,6 +29,14 @@ PAGES = {
     "/download": "<p>Bitte bestätigen</p><a href='/file.bin' download>Abmelden bestätigen</a>",
     "/home": "<p>Welcome</p>",
     "/bought": "<p>Thank you for your purchase</p>",
+    "/busy": "<p>Bitte bestätigen</p><button>Abmelden bestätigen</button>"
+             "<script>addEventListener('load', () => setTimeout(() => { while (true) {} }, 50))</script>",
+    "/rtc": "<p id='r'>?</p><button>Abmelden</button><script>document.getElementById('r').textContent ="
+            " 'rtc:' + typeof RTCPeerConnection + ',' + typeof webkitRTCPeerConnection</script>",
+    "/many-links-password": "".join(f"<a href='/home?{i}'>Link {i}</a> " for i in range(70)) +
+                            "<form><input type='password' name='pw'><button>Abmelden</button></form>",
+    "/frame-password": "<p>Abmelden</p><iframe src='/pwframe'></iframe><button>Abmelden bestätigen</button>",
+    "/pwframe": "<form><input type='text' name='u'><input type='password' name='pw'></form>",
 }
 
 
@@ -44,8 +54,31 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        path = urlsplit(self.path).path
+        parts = urlsplit(self.path)
+        path, query = parts.path, parse_qs(parts.query)
         Handler.log.append(("GET", path, {}))
+        if path == "/redirect":
+            return self._send("", 302, {"Location": query["to"][0]})
+        if path == "/img":
+            return self._send(f"<p>Bild</p><img src='{html.escape(query['src'][0])}'>")
+        if path == "/fetch":
+            target = html.escape(query["to"][0])
+            return self._send(f"<p>Skript</p><script>fetch('{target}', {{mode: 'no-cors'}}).catch(() => 0);"
+                              f"navigator.sendBeacon('{target}', 'x')</script>")
+        if path == "/hang-img":
+            # loads a blocked image, then never finishes the document (a byte a second keeps the connection busy)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"<!doctype html><html><body><p>Laedt ...</p><img src='http://192.168.8.111/p.gif'>")
+            for _ in range(10):
+                try:
+                    self.wfile.write(b" ")
+                    self.wfile.flush()
+                except OSError:
+                    return
+                time.sleep(1)
+            return
         if path == "/to-private":
             return self._send("", 302, {"Location": "http://192.168.8.111/admin"})
         if path == "/file.bin":
@@ -78,3 +111,28 @@ def start() -> tuple[ThreadingHTTPServer, str]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def start_other() -> tuple[ThreadingHTTPServer, str, list]:
+    """A second server on 127.0.0.1 with its own request log: the browser must never reach it."""
+
+    class Other(BaseHTTPRequestHandler):
+        log = []
+
+        def do_GET(self):
+            Other.log.append((self.command, self.path))
+            data = b"<p>other server</p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        do_POST = do_GET
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Other)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}", Other.log
