@@ -24,6 +24,26 @@ def test_finds_anchor_and_plain_links_without_duplicates():
     assert unsub.find_unsubscribe_links(html) == ["https://ex.org/u?id=1", "https://ex.org/unsubscribe/2"]
 
 
+def test_escaped_ampersand_in_an_href_does_not_give_a_second_mangled_link():
+    html = ('<a href="https://ex.org/unsubscribe?u=1&amp;t=abc">Abmelden</a>'
+            ' <a href="https://ex.org/unsubscribe-all?u=1">Von allen abmelden</a>')
+    assert unsub.find_unsubscribe_links(html) == ["https://ex.org/unsubscribe?u=1&t=abc",
+                                                  "https://ex.org/unsubscribe-all?u=1"]
+
+
+def test_plain_text_link_keeps_its_place_behind_an_escaped_duplicate():
+    html = ('<a href="https://ex.org/unsubscribe?u=1&amp;t=abc">Abmelden</a>'
+            ' oder hier: https://ex.org/unsubscribe/2.')
+    assert unsub.find_unsubscribe_links(html) == ["https://ex.org/unsubscribe?u=1&t=abc",
+                                                  "https://ex.org/unsubscribe/2"]
+
+
+@pytest.mark.parametrize("tail", [".", ",", ";", ":", "!", "?", ")", "”", "’", "»", ").", "!”"])
+def test_punctuation_after_a_plain_text_link_is_not_part_of_it(tail):
+    text = "Abmelden (siehe https://ex.org/unsubscribe/2" + tail + " danach)"
+    assert unsub.find_unsubscribe_links(text) == ["https://ex.org/unsubscribe/2"]
+
+
 @pytest.mark.parametrize("href", ["javascript:alert(1)", "data:text/html,<script>x</script>", "JavaScript:x"])
 def test_dangerous_links_are_dropped(href):
     assert unsub.find_unsubscribe_links(f'<a href="{href}">Unsubscribe</a>') == []

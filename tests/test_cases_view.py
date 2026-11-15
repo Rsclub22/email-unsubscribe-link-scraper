@@ -52,6 +52,46 @@ def test_result_shows_cases_with_state_reason_evidence_and_links(unsub, monkeypa
     assert "2 mail(s) from senders that are not allowed" in html
 
 
+def test_max_deferrals_default_and_from_environment(unsub, monkeypatch):
+    import app
+    assert unsub.WORKER.max_deferrals == 12
+    monkeypatch.setenv("AGENT_MAX_DEFERRALS", "3")
+    assert importlib.reload(app).WORKER.max_deferrals == 3
+
+
+def test_result_shows_cases_waiting_for_the_model(unsub, monkeypatch):
+    unsub.STORE.set_meta("last_run", json.dumps({"new": 0, "deferred": 2, "error": ""}))
+    monkeypatch.setattr(unsub, "scan_inbox", lambda: {})
+    html = unsub.app.test_client().get("/result").get_data(as_text=True)
+    assert "2 case(s) waiting for the model." in html
+
+
+def test_retry_only_for_a_case_with_its_mail_in_the_inbox(unsub, monkeypatch):
+    s = unsub.STORE
+    for key in ("<here@x>", "<gone@x>"):
+        s.add(key, key, ["https://bank.example/u"], "")
+        s.claim(key)
+        s.finish(key, "not_possible", "login")
+    monkeypatch.setattr(unsub, "scan_inbox", lambda: {"<here@x>": b"42"})
+    html = unsub.app.test_client().get("/result").get_data(as_text=True)
+    assert html.count('action="/retry"') == 1 and 'name="key" value="&lt;here@x&gt;"' in html
+    assert 'name="key" value="&lt;gone@x&gt;"' not in html
+
+
+def test_unmoved_success_shows_not_moved_yet(unsub, monkeypatch):
+    s = unsub.STORE
+    for key in ("<unmoved@x>", "<moved@x>"):
+        s.add(key, key, ["https://shop.example/u"], "")
+        s.claim(key)
+        s.finish(key, "unsubscribed", "page confirms")
+    s.mark_moved("<moved@x>")
+    monkeypatch.setattr(unsub, "scan_inbox", lambda: {"<unmoved@x>": b"7"})
+    html = unsub.app.test_client().get("/result").get_data(as_text=True)
+    assert html.count("not moved yet") == 1
+    row = html[html.index("&lt;unmoved@x&gt;"):]
+    assert row.index("not moved yet") < row.index("</tr>")
+
+
 def test_retry_resets_the_case(unsub):
     s = unsub.STORE
     s.add("<no@x>", "s", ["https://bank.example/u"], "")

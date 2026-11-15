@@ -13,5 +13,6 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"
 
-# one worker, one thread: cases run one after the other, each with a fresh browser; a case may take 5 minutes
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "1", "--timeout", "420", "server:app"]
+# one worker: cases run one after the other (LOCK in server.py), each with a fresh browser; a case may take
+# 5 minutes. The second thread answers /health meanwhile, so the container is not reported unhealthy.
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "2", "--timeout", "420", "server:app"]

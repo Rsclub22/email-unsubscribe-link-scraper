@@ -8,6 +8,7 @@ mailbox credentials come from the environment.
 
 import datetime
 import email
+import html
 import imaplib
 import json
 import logging
@@ -54,6 +55,8 @@ UNSUBSCRIBE_PATTERN = re.compile(
 )
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
 UID_PATTERN = re.compile(r"^\d+$")
+# Characters that end a sentence or close a quote or bracket in running text, not a URL.
+TRAILING_PUNCTUATION = ".,;:!?)\"'\u201d\u2019\u00bb\u203a"
 
 
 def is_safe_link(url: str) -> bool:
@@ -89,7 +92,10 @@ def find_unsubscribe_links(text: str) -> list[str]:
         if UNSUBSCRIBE_PATTERN.search(str(anchor)) and is_safe_link(href) and href not in links:
             links.append(href)
     for url in URL_PATTERN.findall(text):
-        if UNSUBSCRIBE_PATTERN.search(url) and url not in links:
+        # the text search also runs over raw HTML: unescape (&amp;) like the parser does for hrefs, so the same
+        # link is not taken twice, and drop punctuation that follows a link in running text
+        url = html.unescape(url).rstrip(TRAILING_PUNCTUATION)
+        if UNSUBSCRIBE_PATTERN.search(url) and is_safe_link(url) and url not in links:
             links.append(url)
     return links
 
@@ -168,6 +174,7 @@ if STORE:
         inbox=EMAIL_FOLDER, done_folder=DONE_FOLDER,
         retention_days=int(os.environ.get("RETENTION_DAYS", "30")),
         max_cases=int(os.environ.get("AGENT_MAX_CASES", "10")),
+        max_deferrals=int(os.environ.get("AGENT_MAX_DEFERRALS", "12")),
         allowed_domains=_env_list("AGENT_ALLOWED_DOMAINS"),
         allowed_senders=_env_list("AGENT_ALLOWED_SENDERS"),
     )

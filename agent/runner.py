@@ -21,6 +21,8 @@ BROWSER_ARGS = ["--disable-dev-shm-usage", "--force-webrtc-ip-handling-policy=di
 WATCHDOG_MARGIN = 2.0       # seconds past the case budget after which the browser context is closed by force
 MAX_TEXT = 6000
 MAX_ELEMENTS = 60
+MAX_LABEL = 80
+MAX_OPTIONS = 20
 EVIDENCE = 400
 
 # Reasons set by this code; any other reason was written by the model (and may contain personal data).
@@ -38,7 +40,7 @@ for (const name of ['RTCPeerConnection', 'webkitRTCPeerConnection', 'RTCDataChan
 
 # Lists the visible controls and marks each with data-ua-idx so the next action can find it again.
 SNAPSHOT_JS = """
-([maxElements, maxText]) => {
+([maxElements, maxText, maxLabel, maxOptions]) => {
   document.querySelectorAll('[data-ua-idx]').forEach(e => e.removeAttribute('data-ua-idx'));
   const selector = 'a[href], button, input, select, textarea, [role=button], [role=link], [role=checkbox], [role=radio]';
   const elements = [];
@@ -59,8 +61,8 @@ SNAPSHOT_JS = """
     const forLabel = el.id ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null;
     if (forLabel) label = forLabel.innerText + ' ' + label;
     else if (wrap && tag !== 'label') label = wrap.innerText + ' ' + label;
-    const item = {n, tag, type, label: label.replace(/\\s+/g, ' ').trim().slice(0, 80)};
-    if (tag === 'select') item.options = Array.from(el.options).map(o => o.text.trim()).slice(0, 20);
+    const item = {n, tag, type, label: label.replace(/\\s+/g, ' ').trim().slice(0, maxLabel)};
+    if (tag === 'select') item.options = Array.from(el.options).map(o => o.text.trim()).slice(0, maxOptions);
     if (type === 'checkbox' || type === 'radio') item.checked = el.checked;
     elements.push(item);
   }
@@ -71,6 +73,49 @@ SNAPSHOT_JS = """
   return {title: document.title, text: text.slice(0, maxText), tail: text.replace(/\\s+/g, ' ').trim(), elements, captcha};
 }
 """
+
+
+_SNAPSHOT_KEYS = frozenset({"title", "text", "tail", "elements", "captcha"})
+_ELEMENT_KEYS = frozenset({"n", "tag", "type", "label"})
+_OPTIONAL_ELEMENT_KEYS = frozenset({"options", "checked"})
+
+
+class SnapshotError(Exception):
+    """The snapshot is not what SNAPSHOT_JS returns: the page tampered with it."""
+
+
+def check_snapshot(snap) -> dict:
+    """The snapshot as SNAPSHOT_JS builds it, checked and cut to its limits again. It is computed in the page's own
+    JavaScript world, so a page script can change what it returns (for example by overriding Array.prototype.push).
+    Raises SnapshotError for anything else."""
+    if type(snap) is not dict or set(snap) != _SNAPSHOT_KEYS:
+        raise SnapshotError("not a snapshot")
+    if not all(type(snap[k]) is str for k in ("title", "text", "tail")) or type(snap["captcha"]) is not bool:
+        raise SnapshotError("snapshot field of the wrong type")
+    raw = snap["elements"]
+    if type(raw) is not list or len(raw) > MAX_ELEMENTS:
+        raise SnapshotError("elements")
+    elements = []
+    for number, e in enumerate(raw, 1):
+        if type(e) is not dict or not _ELEMENT_KEYS <= set(e) <= _ELEMENT_KEYS | _OPTIONAL_ELEMENT_KEYS:
+            raise SnapshotError("element keys")
+        if type(e["n"]) is not int or e["n"] != number:
+            raise SnapshotError("element number")
+        if not all(type(e[k]) is str for k in ("tag", "type", "label")):
+            raise SnapshotError("element field of the wrong type")
+        item = {"n": number, "tag": e["tag"], "type": e["type"], "label": e["label"][:MAX_LABEL]}
+        if "options" in e:
+            options = e["options"]
+            if type(options) is not list or len(options) > MAX_OPTIONS or not all(type(o) is str for o in options):
+                raise SnapshotError("element options")
+            item["options"] = list(options)
+        if "checked" in e:
+            if type(e["checked"]) is not bool:
+                raise SnapshotError("element checked")
+            item["checked"] = e["checked"]
+        elements.append(item)
+    return {"title": snap["title"], "text": snap["text"][:MAX_TEXT], "tail": snap["tail"], "elements": elements,
+            "captcha": snap["captcha"]}
 
 
 def _result(result: str, reason: str = "", evidence: str = "", evidence_url: str = "", steps: int = 0, stage: int = 1) -> dict:
@@ -256,19 +301,25 @@ def run_case(browser, url: str, address: str, llm, *, max_steps: int = 20, case_
         while True:
             if over():
                 return budget()
+            limits = [MAX_ELEMENTS, MAX_TEXT, MAX_LABEL, MAX_OPTIONS]
             try:
-                snap = page.evaluate(SNAPSHOT_JS, [MAX_ELEMENTS, MAX_TEXT])
+                raw = page.evaluate(SNAPSHOT_JS, limits)
             except Exception:
                 if over():
                     return budget()
                 _settle(page, nav_timeout)      # the page was still navigating; one more try
                 try:
-                    snap = page.evaluate(SNAPSHOT_JS, [MAX_ELEMENTS, MAX_TEXT])
+                    raw = page.evaluate(SNAPSHOT_JS, limits)
                 except Exception:
                     if over():
                         return budget()
                     return _result("not_possible", "page_error", steps=steps, stage=2 if steps else 1)
             stage = 2 if steps else 1
+            try:
+                snap = check_snapshot(raw)       # before anything else uses it
+            except SnapshotError:
+                logger.info("page returned a malformed snapshot")
+                return _result("not_possible", "page_error", steps=steps, stage=stage)
             here = page.url
             if not url_ok(here) and here != "about:blank":
                 return _result("not_possible", "blocked_address", steps=steps, stage=stage)

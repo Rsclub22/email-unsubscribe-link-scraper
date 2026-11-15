@@ -26,13 +26,16 @@ def looks_unsubscribed(text: str) -> bool:
 
 
 def needs_input(elements: list[dict]) -> bool:
-    """True if the page still offers something to fill in or a button that looks like a confirmation."""
+    """True if the page still offers something to fill in, or a button or link that looks like a confirmation.
+
+    Clickable non-form elements (links, buttons, elements with a role such as button) count by their label. The
+    snapshot does not record the role: such elements are listed with their own tag (div, span, ...)."""
     for e in elements:
         if e["tag"] in ("select", "textarea"):
             return True
         if e["tag"] == "input" and e["type"] not in ("button", "submit", "reset", "image"):
             return True
-        if (e["tag"] == "button" or e["type"] in ("button", "submit")) and _CONFIRM.search(e.get("label", "")):
+        if (e["tag"] != "input" or e["type"] in ("button", "submit")) and _CONFIRM.search(e.get("label", "")):
             return True
     return False
 

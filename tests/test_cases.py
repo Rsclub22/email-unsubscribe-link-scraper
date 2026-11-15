@@ -83,6 +83,57 @@ def test_retry_makes_a_failed_case_pending_again(store):
     assert (c["state"], c["attempts"], c["reason"]) == ("new", 0, "")
 
 
+def test_defer_gives_the_attempt_back_and_counts_deferrals(store):
+    store.add("<1>", "s", ["https://e.org"], "")
+    store.claim("<1>")
+    assert store.defer("<1>") == 1
+    c = store.get("<1>")
+    assert (c["state"], c["attempts"], c["deferrals"]) == ("new", 0, 1)
+    store.claim("<1>")
+    assert store.defer("<1>") == 2
+
+
+def test_pending_puts_deferred_cases_behind_the_others(store):
+    for k in ("<1>", "<2>"):
+        store.add(k, k, ["https://e.org"], "")
+    store.claim("<1>")
+    store.defer("<1>")
+    store.add("<3>", "<3>", ["https://e.org"], "")
+    assert [c["key"] for c in store.pending(10)] == ["<2>", "<3>", "<1>"]
+
+
+def test_retry_resets_the_deferrals(store):
+    store.add("<1>", "s", ["https://e.org"], "")
+    store.claim("<1>")
+    store.defer("<1>")
+    store.claim("<1>")
+    store.finish("<1>", "unclear", "model unavailable for this case")
+    store.retry("<1>")
+    assert (store.get("<1>")["state"], store.get("<1>")["deferrals"]) == ("new", 0)
+
+
+def test_database_without_the_deferrals_column_is_migrated(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    db = sqlite3.connect(path)
+    db.execute(
+        "CREATE TABLE cases ("
+        "key TEXT PRIMARY KEY, subject TEXT NOT NULL, links TEXT NOT NULL, address TEXT NOT NULL, "
+        "state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '', "
+        "evidence_url TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, "
+        "moved INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL)")
+    db.execute("INSERT INTO cases (key, subject, links, address, state, created_at, updated_at) "
+               "VALUES ('<old>', 's', '[]', '', 'new', 1.0, 1.0)")
+    db.commit()
+    db.close()
+    store = CaseStore(path)
+    assert store.get("<old>")["deferrals"] == 0
+    store.claim("<old>")
+    assert store.defer("<old>") == 1
+    CaseStore(path)                    # opening a migrated database again changes nothing
+    assert store.get("<old>")["deferrals"] == 1
+
+
 def test_expired_only_moved_successes_older_than_days(store):
     for k in ("<old>", "<young>", "<failed>"):
         store.add(k, "s", ["https://e.org"], "")

@@ -44,12 +44,24 @@ browser, first checks for a confirmation without a model and otherwise lets a mo
 actions (click, select, check, insert the address, done). Successes are moved to the IMAP folder `DONE_FOLDER`
 (`Erledigt`) and deleted after `RETENTION_DAYS` (30); everything else stays in the inbox with a reason.
 "Run now" starts a run in the background and returns at once; the result page shows its outcome afterwards.
-Further settings: `AGENT_CASE_TIMEOUT` (300), `AGENT_MAX_CASES` (10), `AGENT_ALLOWED_DOMAINS` (comma separated;
-only addresses of these domains are ever typed into a page), `AGENT_SCHEDULER=0` (no background run).
+Cases whose mail has left the inbox (moved to the trash by hand, for example) are removed from the list on the next
+run; a success that was not moved yet counts as moved and expires with the retention period.
+If the model is unavailable for a case (the agent answers `error`), the case waits and the run goes on with the next
+one; after `AGENT_MAX_DEFERRALS` (12) such runs it is finished as unclear ("model unavailable for this case").
+If the agent container itself cannot be reached, the run stops and no case uses up its attempt.
+Further settings: `AGENT_CASE_TIMEOUT` (300), `AGENT_MAX_CASES` (10), `AGENT_SCHEDULER=0` (no background run).
+`AGENT_ALLOWED_DOMAINS` (comma separated) decides which addresses may ever be typed into a page. It takes two kinds
+of entries: a bare domain (`wagnersnetz.de`) allows every address of that domain, a full address
+(`someone@gmail.com`) allows exactly that address. List addresses at public mail providers (Gmail, GMX, Outlook, ...)
+as full addresses, never their domain: the recipient is read from the forwarded text, and a newsletter body with a
+line like `To: stranger@gmail.com` would otherwise make the agent type a stranger's address.
 `AGENT_ALLOWED_SENDERS` (comma separated) lists the forwarders whose mails become cases; mails from other
 senders are ignored. With the agent on and an empty list nothing is processed.
 
 The agent container needs `LLM_BASE_URL` (Open WebUI, `/api/chat/completions` is appended), `LLM_MODEL`,
-`LLM_API_KEY`, optionally `MAX_STEPS` (20) and `CASE_TIMEOUT` (300). It must run in a network from which private
+`LLM_API_KEY` and `BLOCKED_NETS`, optionally `MAX_STEPS` (20) and `CASE_TIMEOUT` (300). `BLOCKED_NETS` is required:
+the networks the agent must never contact although they look public (for example the host's own container
+networks), as a comma-separated list of CIDRs, or `none` for no site-specific networks; without it the service does
+not start. It must run in a network from which private
 addresses are not reachable; the URL guard in `agent/guard.py` is only the first line of defence.
 Tests: `pytest tests`, `cd agent && pytest tests` and `sh agent/tests/run-in-docker.sh` (browser tests).

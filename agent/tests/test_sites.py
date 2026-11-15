@@ -216,7 +216,15 @@ def test_embedded_private_content_is_blocked_but_the_page_still_works(browser, s
                 return '{"action":"done","result":"unsubscribed","reason":"ok"}'
             return '{"action":"click","element":%d}' % element(user, "Abmelden bestätigen")
 
-    assert run(browser, site, "/embeds-private", Confirm())["result"] == "unsubscribed"
+    refused = []
+    assert run(browser, site, "/embeds-private", Confirm(), blocked_log=refused)["result"] == "unsubscribed"
+    assert "http://192.168.8.111/pixel.gif" in refused     # the embedded request was made and refused
+
+
+def test_page_that_tampers_with_the_snapshot_ends_as_page_error_without_the_model(browser, site):
+    llm = Script()
+    r = run(browser, site, "/tamper-push", llm)
+    assert (r["result"], r["reason"]) == ("not_possible", "page_error") and llm.prompts == []
 
 
 def test_download_is_not_kept(browser, site, tmp_path, caplog, monkeypatch):

@@ -32,6 +32,8 @@ class FakeIMAP:
         self.fail_copy = False
         self.logged_out = False
         self.fail_store_once = False
+        self.search_status = "OK"
+        self.fail_fetch = set()
         self.calls = []
 
     def select(self, folder):
@@ -54,8 +56,12 @@ class FakeIMAP:
                 wanted = args[3].strip('"')
                 hits = [u for u, raw in box.items() if ("Message-ID: " + wanted).encode() in raw]
                 return "OK", [b" ".join(hits)]
+            if self.search_status != "OK":
+                return self.search_status, [b"search failed"]
             return "OK", [b" ".join(box)]
         if command == "fetch":
+            if args[0] in self.fail_fetch:
+                return "NO", [None]
             return "OK", [(b"1 (BODY[] {n}", box[args[0]]), b")"]
         if command == "copy":
             if self.fail_copy or args[0] not in box:
@@ -161,6 +167,50 @@ def test_model_unavailable_result_counts_like_an_unavailable_agent(store):
     assert summary["error"] == "llm_unavailable" and store.get("<a@x>")["attempts"] == 0
 
 
+ERR = {"result": "error", "reason": "llm_unavailable"}
+
+
+def test_model_error_defers_the_case_and_the_run_goes_on(store):
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>", link="https://shop.example/unsubscribe/a"),
+                     b"2": mail_bytes("<b@x>", link="https://shop.example/unsubscribe/b")})
+    agent = Agent(ERR, OK)
+    summary = worker(store, imap, agent).run_once()
+    first, second = store.get("<a@x>"), store.get("<b@x>")
+    assert second["state"] == "unsubscribed"
+    assert (first["state"], first["attempts"], first["deferrals"]) == ("new", 0, 1)
+    assert summary["error"] == "" and summary["deferred"] == 1 and summary["handled"] == 1
+
+
+def test_deferred_case_is_tried_after_newer_ones(store):
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>", link="https://shop.example/unsubscribe/a")})
+    agent = Agent(ERR)
+    w = worker(store, imap, agent)
+    assert w.run_once()["deferred"] == 1
+    imap.folders["INBOX"][b"2"] = mail_bytes("<b@x>", link="https://shop.example/unsubscribe/b")
+    agent.calls, agent.results = [], [OK, OK]
+    w.run_once()
+    assert [u for u, _ in agent.calls] == ["https://shop.example/unsubscribe/b", "https://shop.example/unsubscribe/a"]
+
+
+def test_case_deferred_max_deferrals_times_ends_unclear(store):
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>")})
+    agent = Agent(ERR, ERR, ERR, OK)
+    w = worker(store, imap, agent, max_deferrals=3)
+    summaries = [w.run_once() for _ in range(4)]
+    c = store.get("<a@x>")
+    assert (c["state"], c["reason"]) == ("unclear", "model unavailable for this case")
+    assert len(agent.calls) == 3 and summaries[3]["handled"] == 0
+    assert [s["deferred"] for s in summaries[:2]] == [1, 1]
+
+
+def test_transport_failure_still_stops_the_run_and_leaves_all_cases_untouched(store):
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>"), b"2": mail_bytes("<b@x>")})
+    agent = Agent(AgentUnavailable("agent not reachable"), OK)
+    summary = worker(store, imap, agent).run_once()
+    assert summary["error"] == "agent not reachable" and summary["deferred"] == 0 and len(agent.calls) == 1
+    assert [(c["state"], c["attempts"], c["deferrals"]) for c in store.all()] == [("new", 0, 0), ("new", 0, 0)]
+
+
 def test_without_agent_cases_are_only_recorded(store):
     imap = FakeIMAP({b"1": mail_bytes("<a@x>"), b"2": mail_bytes("<nolink@x>", link="")})
     summary = worker(store, imap, None).run_once()
@@ -174,6 +224,21 @@ def test_paused_run_does_nothing(store):
     agent = Agent(OK)
     summary = worker(store, imap, agent).run_once()
     assert summary["error"] == "paused" and agent.calls == [] and store.all() == []
+
+
+def test_pause_during_a_run_stops_before_the_next_case(store):
+    imap = FakeIMAP({str(i).encode(): mail_bytes(f"<{i}@x>") for i in range(1, 4)})
+
+    class Pausing(Agent):
+        def __call__(self, url, address):
+            store.set_meta("paused", "1")      # "Pause agent" pressed while the first case runs
+            return super().__call__(url, address)
+
+    agent = Pausing(OK, OK, OK)
+    summary = worker(store, imap, agent).run_once()
+    assert len(agent.calls) == 1 and summary["error"] == "paused"
+    assert summary["handled"] == 1 and summary["moved"] == 1    # what is finished is still moved
+    assert [c["state"] for c in store.all()].count("new") == 2
 
 
 def test_at_most_max_cases_per_run(store):
@@ -272,6 +337,78 @@ def test_case_whose_mail_left_the_inbox_is_not_handled(store):
     assert agent.calls == []
 
 
+def test_failed_case_whose_mail_was_moved_to_the_trash_disappears(store):
+    imap = FakeIMAP({b"7": mail_bytes("<a@x>")})
+    w = worker(store, imap, Agent({"result": "not_possible", "reason": "captcha"}))
+    w.run_once()
+    assert store.get("<a@x>")["state"] == "not_possible"
+    imap.folders["INBOX"].pop(b"7")                 # "Move to Trash" on the page
+    summary = w.run_once()
+    assert store.get("<a@x>") is None and summary["gone"] == 1
+
+
+def test_new_case_whose_mail_is_gone_is_deleted_but_a_running_one_is_left_alone(store):
+    old_case(store, "<new@x>")
+    old_case(store, "<running@x>")
+    store.claim("<running@x>")
+    summary = worker(store, FakeIMAP({}), Agent()).run_once()
+    assert store.get("<new@x>") is None and store.get("<running@x>")["state"] == "running"
+    assert summary["gone"] == 1
+
+
+def test_unmoved_success_whose_mail_is_gone_counts_as_moved_and_expires(store):
+    imap = FakeIMAP({b"7": mail_bytes("<a@x>")})
+    imap.fail_copy = True
+    now = [time.time()]
+    w = worker(store, imap, Agent(OK), clock=lambda: now[0], retention_days=30)
+    w.run_once()
+    assert (store.get("<a@x>")["state"], store.get("<a@x>")["moved"]) == ("unsubscribed", 0)
+    imap.folders["INBOX"].pop(b"7")                 # moved by hand
+    summary = w.run_once()
+    assert store.get("<a@x>")["moved"] == 1 and summary["gone"] == 1
+    imap.folders["Erledigt"] = {}
+    now[0] = store.get("<a@x>")["updated_at"] + 31 * 86400
+    assert w.run_once()["cleaned"] == 1 and store.get("<a@x>") is None
+
+
+@pytest.mark.parametrize("status", ["NO", "BAD"])
+def test_failed_inbox_search_ends_the_run_with_an_error_and_deletes_nothing(store, status):
+    old_case(store, "<a@x>")
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>")})
+    imap.search_status = status
+    agent = Agent(OK)
+    summary = worker(store, imap, agent).run_once()
+    assert summary["error"] == "inbox scan failed" and summary["gone"] == 0 and agent.calls == []
+    assert store.get("<a@x>")["state"] == "new" and imap.logged_out
+    assert json.loads(store.meta("last_run"))["error"] == "inbox scan failed"
+
+
+def test_case_added_by_the_page_during_the_scan_is_not_tidied_away(store):
+    def parse_while_the_page_scans(message):
+        store.add("<arrived@x>", "s", ["https://shop.example/unsubscribe/9"], "")   # page scan saw a newer mail
+        return parse(message)
+
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>")})
+    w = Worker(store, lambda: imap, parse_while_the_page_scans, None, allowed_domains=("wagnersnetz.de",))
+    assert w.run_once()["gone"] == 0 and store.get("<arrived@x>") is not None
+
+
+def test_unreadable_mail_in_the_inbox_means_nothing_is_tidied(store):
+    old_case(store, "<a@x>")
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>"), b"2": mail_bytes("<b@x>")})
+    imap.fail_fetch = {b"1"}                         # could be the mail of <a@x>: its key is unknown
+    summary = worker(store, imap, Agent(OK, OK)).run_once()
+    assert store.get("<a@x>") is not None and summary["gone"] == 0
+    assert store.get("<b@x>")["state"] == "unsubscribed"
+
+
+def test_case_of_a_mail_from_a_sender_no_longer_allowed_is_kept(store):
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>", sender="Mallory <mallory@evil.example>")})
+    worker(store, imap, None, allowed_senders=()).run_once()
+    summary = worker(store, imap, Agent(OK), allowed_senders=("jens@wagnersnetz.de",)).run_once()
+    assert store.get("<a@x>")["state"] == "new" and summary["gone"] == 0
+
+
 def test_skipped_cases_do_not_eat_the_budget(store):
     for i in range(3):
         old_case(store, f"<gone{i}@x>")
@@ -354,7 +491,7 @@ def test_failed_delete_flag_keeps_the_case_unmoved(store):
     assert w.run_once()["moved"] == 1 and store.get("<a@x>")["moved"] == 1
 
 
-ALL_KEYS = {"new", "handled", "unsubscribed", "moved", "cleaned", "without_link", "ignored", "error"}
+ALL_KEYS = {"new", "handled", "unsubscribed", "moved", "cleaned", "without_link", "ignored", "error", "deferred", "gone"}
 
 
 class Boom:

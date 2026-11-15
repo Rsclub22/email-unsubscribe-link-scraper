@@ -29,8 +29,12 @@ class CaseStore:
                 "key TEXT PRIMARY KEY, subject TEXT NOT NULL, links TEXT NOT NULL, address TEXT NOT NULL, "
                 "state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', evidence TEXT NOT NULL DEFAULT '', "
                 "evidence_url TEXT NOT NULL DEFAULT '', attempts INTEGER NOT NULL DEFAULT 0, "
-                "moved INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+                "moved INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, updated_at REAL NOT NULL, "
+                "deferrals INTEGER NOT NULL DEFAULT 0)"
             )
+            columns = {row["name"] for row in self._db.execute("PRAGMA table_info(cases)")}
+            if "deferrals" not in columns:   # database from before deferrals were counted
+                self._db.execute("ALTER TABLE cases ADD COLUMN deferrals INTEGER NOT NULL DEFAULT 0")
             self._db.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
 
     def _run(self, sql: str, args=()) -> int:
@@ -61,8 +65,10 @@ class CaseStore:
         return self._rows("SELECT * FROM cases ORDER BY created_at DESC, key")
 
     def pending(self, limit: int) -> list[dict]:
+        """Untried new cases; deferred ones behind the others, each group longest untouched first."""
         return self._rows(
-            "SELECT * FROM cases WHERE state = 'new' AND attempts = 0 ORDER BY created_at, rowid LIMIT ?", (limit,))
+            "SELECT * FROM cases WHERE state = 'new' AND attempts = 0 "
+            "ORDER BY deferrals > 0, updated_at, rowid LIMIT ?", (limit,))
 
     def claim(self, key: str) -> None:
         self._run("UPDATE cases SET state = 'running', attempts = attempts + 1, updated_at = ? WHERE key = ?",
@@ -72,6 +78,15 @@ class CaseStore:
         """Give a claimed case back without counting the attempt (agent or model was unavailable)."""
         self._run("UPDATE cases SET state = 'new', attempts = MAX(attempts - 1, 0), updated_at = ? "
                   "WHERE key = ? AND state = 'running'", (time.time(), key))
+
+    def defer(self, key: str) -> int:
+        """Like release, and count the deferral (the model was unavailable for this case). Returns the new count."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE cases SET state = 'new', attempts = MAX(attempts - 1, 0), "
+                             "deferrals = deferrals + 1, updated_at = ? WHERE key = ? AND state = 'running'",
+                             (time.time(), key))
+            row = self._db.execute("SELECT deferrals FROM cases WHERE key = ?", (key,)).fetchone()
+        return row["deferrals"] if row else 0
 
     def finish(self, key: str, state: str, reason: str = "", evidence: str = "", evidence_url: str = "") -> None:
         if state not in ("unsubscribed", "not_possible", "unclear"):
@@ -86,8 +101,9 @@ class CaseStore:
         self._run("UPDATE cases SET moved = 1 WHERE key = ?", (key,))
 
     def retry(self, key: str) -> None:
-        self._run("UPDATE cases SET state = 'new', attempts = 0, reason = '', evidence = '', evidence_url = '', "
-                  "updated_at = ? WHERE key = ? AND state IN ('not_possible', 'unclear')", (time.time(), key))
+        self._run("UPDATE cases SET state = 'new', attempts = 0, deferrals = 0, reason = '', evidence = '', "
+                  "evidence_url = '', updated_at = ? WHERE key = ? AND state IN ('not_possible', 'unclear')",
+                  (time.time(), key))
 
     def expired(self, days: int, now: float | None = None) -> list[dict]:
         limit = (now if now is not None else time.time()) - days * 86400

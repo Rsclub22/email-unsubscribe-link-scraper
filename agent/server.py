@@ -16,11 +16,11 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 
-def _required(name: str) -> str:
+def _required(name: str, meaning: str = "the agent cannot reach the model without it") -> str:
     """A setting the service cannot work without: a missing one stops the start instead of failing every case."""
     value = os.environ.get(name, "").strip()
     if not value:
-        raise RuntimeError(f"{name} is not set: the agent cannot reach the model without it")
+        raise RuntimeError(f"{name} is not set: {meaning}")
     return value
 
 
@@ -43,7 +43,9 @@ if _LOOPBACK_SWITCH in os.environ:
     raise RuntimeError(f"{_LOOPBACK_SWITCH} is set: loopback requests would bypass the egress proxy")
 
 # Site networks must be stated explicitly ("none" for none): a forgotten variable must not open them.
-guard.BLOCKED_NETS = guard.parse_blocked_nets(_required("BLOCKED_NETS"))
+guard.BLOCKED_NETS = guard.parse_blocked_nets(_required(
+    "BLOCKED_NETS", "it lists the networks the agent must never contact (comma-separated CIDRs), "
+                    "or none for no site-specific networks"))
 logger.info("%d site network(s) blocked", len(guard.BLOCKED_NETS))
 
 MODEL = LLM(_model_url(), _required("LLM_MODEL"), _required("LLM_API_KEY"))   # one case at a time: shared

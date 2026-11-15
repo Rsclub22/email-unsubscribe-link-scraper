@@ -43,3 +43,32 @@ def test_subdomain_is_not_allowed_implicitly():
 def test_malformed_forwarder_is_not_used():
     assert original_recipient("no header", "a@b@wagnersnetz.de", ALLOWED) == ""
     assert original_recipient("no header", "<x y@wagnersnetz.de>", ALLOWED) == ""
+
+
+def test_full_address_entry_allows_only_that_address():
+    allowed = ("wagnersnetz.de", "Some.One@Gmail.com")
+    assert original_recipient("To: some.one@gmail.com\n", "", allowed) == "some.one@gmail.com"
+    assert original_recipient("To: SOME.ONE@GMAIL.COM\n", "", allowed) == "some.one@gmail.com"
+    assert original_recipient("To: someone.else@gmail.com\n", "", allowed) == ""
+
+
+def test_body_line_with_a_third_persons_public_address_is_refused():
+    text = ("Von: news@shop.example\nAn: philipp@gmail.com\n\nWrite to us!\nTo: someone@gmail.com\n")
+    allowed = ("wagnersnetz.de", "philipp@gmail.com")
+    assert original_recipient("To: someone@gmail.com\n", "philipp@gmail.com", allowed) == "philipp@gmail.com"
+    assert original_recipient(text, "", allowed) == "philipp@gmail.com"
+
+
+def test_mixed_list_of_domains_and_addresses():
+    allowed = ("wagnersnetz.de", "anne@gmail.com")
+    assert original_recipient("To: x@elsewhere.example, jens@wagnersnetz.de\n", "", allowed) == "jens@wagnersnetz.de"
+    assert original_recipient("To: bob@gmail.com, anne@gmail.com\n", "", allowed) == "anne@gmail.com"
+    assert original_recipient("no header", "anne@gmail.com", allowed) == "anne@gmail.com"
+    assert original_recipient("no header", "bob@gmail.com", allowed) == ""
+
+
+def test_address_entry_does_not_allow_its_domain_or_a_lookalike():
+    allowed = ("anne@gmail.com",)
+    assert original_recipient("To: gmail.com@gmail.com\n", "", allowed) == ""
+    assert original_recipient("To: xanne@gmail.com\n", "", allowed) == ""
+    assert original_recipient("To: anne@gmail.com.evil.example\n", "", allowed) == ""

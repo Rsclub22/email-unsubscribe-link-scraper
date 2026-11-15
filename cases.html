@@ -12,7 +12,8 @@
             {{ last.get('new', 0) }} new, {{ last.get('unsubscribed', 0) }} unsubscribed,
             {{ last.get('moved', 0) }} moved, {{ last.get('cleaned', 0) }} cleaned up.
             {{ last.get('without_link', 0) }} mail(s) without unsubscribe link.
-            {{ last.get('ignored', 0) }} mail(s) from senders that are not allowed.{% endif %}
+            {{ last.get('ignored', 0) }} mail(s) from senders that are not allowed.
+            {% if last.get('deferred') %}{{ last['deferred'] }} case(s) waiting for the model.{% endif %}{% endif %}
         </p>
         {% if last.get('error') %}<p class="error">Last run: {{ last['error'] }}</p>{% endif %}
         {% if not agent %}<p class="error">The agent is switched off: cases are listed, nothing is unsubscribed automatically.</p>{% endif %}
@@ -34,7 +35,7 @@
             {% for case in cases %}
             <tr>
                 <td>{{ case.subject }}</td>
-                <td>{{ case.label }}</td>
+                <td>{{ case.label }}{% if case.state == 'unsubscribed' and not case.moved %}<br><small>not moved yet</small>{% endif %}</td>
                 <td>
                     {{ case.reason }}
                     {% if case.evidence %}<br><small>“…{{ case.evidence }}” ({{ case.evidence_url }})</small>{% endif %}
@@ -45,7 +46,7 @@
                     {% endfor %}
                 </td>
                 <td>
-                    {% if case.state in ('not_possible', 'unclear') %}
+                    {% if case.state in ('not_possible', 'unclear') and case.uid %}
                     <form action="{{ url_for('retry') }}" method="post">
                         <input type="hidden" name="key" value="{{ case.key }}">
                         <button type="submit" class="btn-primary">Try again</button>

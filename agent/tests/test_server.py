@@ -63,6 +63,20 @@ def test_health(client):
     assert r.status_code == 200 and r.get_json() == {"status": "ok"}
 
 
+def test_health_answers_while_a_case_holds_the_lock(server):
+    import threading
+    answers = []
+
+    def ask():
+        answers.append(server.app.test_client().get("/health").status_code)
+
+    with server.LOCK:                     # a case is running
+        t = threading.Thread(target=ask)
+        t.start()
+        t.join(timeout=5)
+    assert answers == [200]
+
+
 @pytest.mark.parametrize("body", ["not json", "[1, 2]", "null", "{}", '{"url": 1}', '{"url": "https://x.example"'
                                   ', "address": 5}', '"https://x.example"'])
 def test_bad_bodies_answer_400(client, body):
@@ -156,6 +170,18 @@ def test_without_blocked_nets_the_service_does_not_start(monkeypatch):
     finally:
         monkeypatch.setenv("BLOCKED_NETS", "none")
         importlib.reload(module)
+
+
+def test_missing_blocked_nets_message_says_what_the_variable_is(monkeypatch):
+    module = reload_with(monkeypatch, BLOCKED_NETS=None)
+    try:
+        with pytest.raises(RuntimeError) as e:
+            importlib.reload(module)
+    finally:
+        monkeypatch.setenv("BLOCKED_NETS", "none")
+        importlib.reload(module)
+    message = str(e.value)
+    assert "must never contact" in message and "none" in message and "model" not in message
 
 
 @pytest.mark.parametrize("value", ["none", " NONE "])

@@ -38,6 +38,18 @@ def test_no_input_needed_for_plain_links_and_unrelated_buttons():
     assert needs_input([]) is False
 
 
+@pytest.mark.parametrize("element", [el("a", "", "Abmeldung bestätigen"), el("a", "", "Unsubscribe"),
+                                     el("div", "", "Abmelden bestätigen"), el("span", "", "Confirm")])
+def test_confirmation_offered_as_a_link_or_role_button_needs_input(element):
+    assert needs_input([el("a", "", "Startseite"), element]) is True
+
+
+def test_success_text_with_a_confirmation_link_is_no_stage_1_success():
+    text = "Abmeldung bestätigt? Bitte klicken Sie unten."
+    elements = [el("a", "", "Abmeldung bestätigen"), el("a", "", "Impressum")]
+    assert looks_unsubscribed(text) is True and needs_input(elements) is True
+
+
 def test_password_field_detected():
     assert has_password([el("input", "text", "User"), el("input", "password", "Passwort")]) is True
     assert has_password([el("input", "text", "User")]) is False

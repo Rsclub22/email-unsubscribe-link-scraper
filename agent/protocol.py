@@ -60,7 +60,7 @@ def _line(value) -> str:
 
 
 def _describe(e: dict) -> str:
-    line = f'[{e["n"]}] {_line(e["tag"])}'
+    line = f'[{int(e["n"])}] {_line(e["tag"])}'   # int(): a number, never text that could forge a line
     if e.get("type"):
         line += f' {_line(e["type"])}'
     line += f' "{_line(e.get("label", ""))}"'
