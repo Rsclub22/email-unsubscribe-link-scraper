@@ -18,6 +18,14 @@ def _allowed(address: str, entries) -> bool:
     return address in entries or address.rsplit("@", 1)[-1] in entries   # a domain entry never contains "@"
 
 
+def sender_allowed(address: str, entries) -> bool:
+    """Whether a forwarder (the address of the From header) is on the list; entries as in _allowed. Anything that
+    is not one plain address is refused, so that odd forms like "@allowed.example" or a quoted local part cannot
+    pass by their last part."""
+    address = address.lower()
+    return bool(_ADDRESS.fullmatch(address)) and _allowed(address, entries)
+
+
 def original_recipient(text: str, forwarder: str, allowed_domains) -> str:
     """First allowed address from the quoted 'To:'/'An:' lines, else the forwarder, else ''.
 

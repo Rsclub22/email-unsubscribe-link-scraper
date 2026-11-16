@@ -56,7 +56,9 @@ of entries: a bare domain (`wagnersnetz.de`) allows every address of that domain
 as full addresses, never their domain: the recipient is read from the forwarded text, and a newsletter body with a
 line like `To: stranger@gmail.com` would otherwise make the agent type a stranger's address.
 `AGENT_ALLOWED_SENDERS` (comma separated) lists the forwarders whose mails become cases; mails from other
-senders are ignored. With the agent on and an empty list nothing is processed.
+senders are ignored. Entries work as above: a bare domain allows every sender of that domain (not of its
+subdomains), a full address exactly that sender. Use a domain only for domains whose mail you control, since the
+From header decides. With the agent on and an empty list nothing is processed.
 
 The agent container needs `LLM_BASE_URL` (Open WebUI, `/api/chat/completions` is appended), `LLM_MODEL`,
 `LLM_API_KEY` and `BLOCKED_NETS`, optionally `MAX_STEPS` (20) and `CASE_TIMEOUT` (300). `BLOCKED_NETS` is required:
