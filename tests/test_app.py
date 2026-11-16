@@ -104,3 +104,57 @@ def test_result_page_renders_hidden_ids_for_move_all(monkeypatch):
     html = unsub.app.test_client().get("/result").get_data(as_text=True)
     assert html.count('name="email_id" value="41"') == 2   # single form + move-all form
     assert 'rel="noopener noreferrer"' in html
+
+
+# --- link named "hier": the word that says "unsubscribe" stands next to the link, in the same sentence ---
+
+LIEFERANDO = (
+    '<table><tr><td>Wir schicken Dir diese E-Mail, weil Du mit der E-Mail-Adresse '
+    '<a href="mailto:philipp@example.org">philipp@example.org</a> unseren Newsletter abonniert hast.<br/>'
+    'Wenn Du keinen Newsletter von uns mehr bekommen möchtest, kannst Du ihn '
+    '<a href="https://click.example/u/1"><u>hier</u></a> abbestellen.<br/><br/>'
+    'Lieferando ist ein Angebot von Takeaway.com<br/>'
+    'E-Mail <a href="https://click.example/view/2"><u>online</u></a> ansehen.</td></tr></table>'
+)
+
+
+def test_link_named_hier_counts_when_its_sentence_says_unsubscribe():
+    assert unsub.find_unsubscribe_links(LIEFERANDO) == ["https://click.example/u/1"]
+
+
+@pytest.mark.parametrize("html", [
+    'To unsubscribe, click <a href="https://click.example/u/1">here</a>.',
+    '<p>Du kannst dich <a href="https://click.example/u/1"><span>hier</span></a> <b>abmelden</b>.</p>',
+    '<div>Newsletter <a href="https://click.example/u/1">hier</a>\n   abbestellen</div>',
+])
+def test_sentence_around_a_short_link_is_read_across_inline_tags(html):
+    assert unsub.find_unsubscribe_links(html) == ["https://click.example/u/1"]
+
+
+@pytest.mark.parametrize("html", [
+    # another sentence of the same paragraph
+    '<p>Zum Abbestellen bitte antworten. Mehr dazu gibt es <a href="https://click.example/x">hier</a>.</p>',
+    '<p>Mehr dazu gibt es <a href="https://click.example/x">hier</a>. Abbestellen geht per Antwort.</p>',
+    # a line break ends the sentence
+    '<td>Newsletter abbestellen<br><a href="https://click.example/x">hier</a> geht es zum Shop</td>',
+    # another block
+    '<p>Newsletter abbestellen ist einfach</p><p><a href="https://click.example/x">hier</a> zum Shop</p>',
+    '<p><a href="https://click.example/x">hier</a> zum Shop</p><div>Newsletter abbestellen</div>',
+    # a link with a text of its own is judged by that text
+    '<p>Abbestellen kannst du jederzeit, lies dazu <a href="https://click.example/x">unsere ausführlichen '
+    'Hinweise zum Datenschutz</a>.</p>',
+    # the word belongs to another link (navigation row) or to a URL written out in the text
+    '<p><a href="https://ex.org/unsubscribe/1">Abmelden</a> | <a href="https://click.example/x">Home</a></p>',
+    '<p>https://ex.org/unsubscribe/1 oder <a href="https://click.example/x">Home</a></p>',
+    # not a web link
+    '<p>Zum Abbestellen <a href="mailto:x@example.org">hier</a> schreiben.</p>',
+])
+def test_short_link_outside_the_unsubscribe_sentence_is_not_taken(html):
+    assert "https://click.example/x" not in unsub.find_unsubscribe_links(html)
+    assert all("mailto" not in link for link in unsub.find_unsubscribe_links(html))
+
+
+def test_link_found_by_its_own_text_is_not_listed_twice_and_comes_first():
+    html = ('<p>Du kannst dich <a href="https://click.example/a">hier</a> abmelden oder '
+            '<a href="https://click.example/b">Newsletter abbestellen</a>.</p>')
+    assert unsub.find_unsubscribe_links(html) == ["https://click.example/b", "https://click.example/a"]

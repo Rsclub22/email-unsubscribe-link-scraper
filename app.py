@@ -19,6 +19,7 @@ from email.header import decode_header, make_header
 
 import httpx
 from bs4 import BeautifulSoup
+from bs4.element import Tag
 from dotenv import load_dotenv
 from flask import Flask, abort, redirect, render_template, request, url_for
 
@@ -57,6 +58,11 @@ URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
 UID_PATTERN = re.compile(r"^\d+$")
 # Characters that end a sentence or close a quote or bracket in running text, not a URL.
 TRAILING_PUNCTUATION = ".,;:!?)\"'\u201d\u2019\u00bb\u203a"
+# A link with a text this short ("hier", "click here") says nothing itself: the sentence around it decides.
+SHORT_LINK_TEXT = 25
+SENTENCE_END = re.compile(r"[.!?\u2026](?:\s|$)")
+# Tags that stand inside a sentence; every other tag (br, p, td, div, ...) ends it.
+INLINE_TAGS = frozenset("a abbr b big code del em font i ins mark nobr s small span strike strong sub sup tt u wbr".split())
 
 
 def is_safe_link(url: str) -> bool:
@@ -83,13 +89,50 @@ def get_subject(message) -> str:
         return raw
 
 
+def _sentence_around(anchor) -> str:
+    """The sentence a link stands in, without the link text: what is written before and after it, up to a full
+    stop, a line break or the edge of the paragraph or table cell."""
+    own = {id(parent) for parent in anchor.parents} | {id(anchor)}
+
+    def side(elements) -> list[str]:
+        parts = []
+        for element in elements:
+            if isinstance(element, Tag):
+                if element.name not in INLINE_TAGS:
+                    break
+                continue
+            parents = [parent for parent in element.parents if id(parent) not in own]
+            if id(anchor) in {id(parent) for parent in element.parents}:   # the link's own text
+                continue
+            if any(parent.name not in INLINE_TAGS for parent in parents):   # text of a neighbouring block
+                break
+            if any(parent.name == "a" for parent in parents):   # another link's text speaks for that link only
+                continue
+            parts.append(str(element))
+        return parts
+
+    before = " ".join("".join(reversed(side(anchor.previous_elements))).split())
+    after = " ".join("".join(side(anchor.next_elements)).split())
+    # a URL written out in the text is a link of its own (see below), not a word of this sentence
+    before, after = URL_PATTERN.sub(" ", before), URL_PATTERN.sub(" ", after)
+    return SENTENCE_END.split(before + " ")[-1] + " " + SENTENCE_END.split(after + " ")[0]
+
+
 def find_unsubscribe_links(text: str) -> list[str]:
-    """Unsubscribe links from HTML anchors (link text or URL matches) and from plain-text URLs."""
+    """Unsubscribe links from HTML anchors (link text or URL matches, or a short link in a sentence that matches)
+    and from plain-text URLs."""
     links: list[str] = []
     soup = BeautifulSoup(text, "html.parser")
-    for anchor in soup.find_all("a", href=True):
+    anchors = soup.find_all("a", href=True)
+    for anchor in anchors:
         href = str(anchor["href"]).strip()
         if UNSUBSCRIBE_PATTERN.search(str(anchor)) and is_safe_link(href) and href not in links:
+            links.append(href)
+    for anchor in anchors:   # "you can unsubscribe <a>here</a>": the word stands next to the link
+        href = str(anchor["href"]).strip()
+        label = " ".join(anchor.get_text(" ").split())
+        if (href not in links and is_safe_link(href) and 0 < len(label) <= SHORT_LINK_TEXT
+                and UNSUBSCRIBE_PATTERN.search(_sentence_around(anchor))):
             links.append(href)
     for url in URL_PATTERN.findall(text):
         # the text search also runs over raw HTML: unescape (&amp;) like the parser does for hrefs, so the same
