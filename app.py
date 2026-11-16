@@ -6,18 +6,25 @@ handled mails to the trash. Runs behind the reverse proxy (Caddy forward_auth / 
 mailbox credentials come from the environment.
 """
 
+import datetime
 import email
+import html
 import imaplib
+import json
 import logging
 import os
 import re
+import threading
 from email.header import decode_header, make_header
 
+import httpx
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, abort, redirect, render_template, request, url_for
 
+from cases import CaseStore
 from oauth import MailboxOAuth, OAuthError, xoauth2_string
+from worker import AgentUnavailable, ScanFailed, Worker, _tick, start_scheduler
 
 load_dotenv()  # optional .env for local runs
 
@@ -37,11 +44,19 @@ app = Flask(__name__, template_folder=template_dir)
 # OAuth (SSO) for the collection mailbox if OIDC_* and TOKEN_KEY are set; otherwise EMAIL_PASSWORD
 OAUTH = MailboxOAuth.from_env()
 
+# Unsubscribe agent: cases live in DATA_DIR/cases.db; without AGENT_URL they are only recorded and shown
+DATA_DIR = os.environ.get("DATA_DIR", "")
+AGENT_URL = os.environ.get("AGENT_URL", "").rstrip("/")
+AGENT_CASE_TIMEOUT = float(os.environ.get("AGENT_CASE_TIMEOUT", "300"))
+DONE_FOLDER = os.environ.get("DONE_FOLDER", "Erledigt")
+
 UNSUBSCRIBE_PATTERN = re.compile(
     r"\babbestellen\b|\bunsubscribe\b|\bdeabonnieren\b|\babbestellung\b|\babmelden\b", re.IGNORECASE
 )
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
 UID_PATTERN = re.compile(r"^\d+$")
+# Characters that end a sentence or close a quote or bracket in running text, not a URL.
+TRAILING_PUNCTUATION = ".,;:!?)\"'\u201d\u2019\u00bb\u203a"
 
 
 def is_safe_link(url: str) -> bool:
@@ -77,7 +92,10 @@ def find_unsubscribe_links(text: str) -> list[str]:
         if UNSUBSCRIBE_PATTERN.search(str(anchor)) and is_safe_link(href) and href not in links:
             links.append(href)
     for url in URL_PATTERN.findall(text):
-        if UNSUBSCRIBE_PATTERN.search(url) and url not in links:
+        # the text search also runs over raw HTML: unescape (&amp;) like the parser does for hrefs, so the same
+        # link is not taken twice, and drop punctuation that follows a link in running text
+        url = html.unescape(url).rstrip(TRAILING_PUNCTUATION)
+        if UNSUBSCRIBE_PATTERN.search(url) and is_safe_link(url) and url not in links:
             links.append(url)
     return links
 
@@ -124,6 +142,60 @@ def move_emails_to_trash(uids: list[str]) -> int:
         mail.logout()
     logger.info("Moved %d mail(s) to %s", len(uids), TRASH_FOLDER)
     return len(uids)
+
+
+def parse_mail(message) -> tuple[str, list[str], str]:
+    text = get_text_from_email(message)
+    return get_subject(message), find_unsubscribe_links(text) if text else [], text
+
+
+def call_agent(url: str, address: str) -> dict:
+    """Hand one link to the agent container. It gets the link and the address, nothing else."""
+    try:
+        # the agent takes up to AGENT_CASE_TIMEOUT per link; leave room for browser start and shutdown
+        r = httpx.post(AGENT_URL + "/run", json={"url": url, "address": address},
+                       timeout=2 * AGENT_CASE_TIMEOUT + 60)
+        r.raise_for_status()
+        return r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        raise AgentUnavailable(f"agent not reachable: {type(e).__name__}") from None
+
+
+def _env_list(name: str) -> list[str]:
+    return [v.strip().lower() for v in os.environ.get(name, "").split(",") if v.strip()]
+
+
+STORE = CaseStore(os.path.join(DATA_DIR, "cases.db")) if DATA_DIR else None
+WORKER = None
+if STORE:
+    STORE.recover()
+    WORKER = Worker(
+        STORE, lambda: connect(), parse_mail, call_agent if AGENT_URL else None,
+        inbox=EMAIL_FOLDER, done_folder=DONE_FOLDER,
+        retention_days=int(os.environ.get("RETENTION_DAYS", "30")),
+        max_cases=int(os.environ.get("AGENT_MAX_CASES", "10")),
+        max_deferrals=int(os.environ.get("AGENT_MAX_DEFERRALS", "12")),
+        allowed_domains=_env_list("AGENT_ALLOWED_DOMAINS"),
+        allowed_senders=_env_list("AGENT_ALLOWED_SENDERS"),
+    )
+    if os.environ.get("AGENT_SCHEDULER", "1") == "1":
+        start_scheduler(WORKER, 60 * int(os.environ.get("AGENT_INTERVAL_MINUTES", "10")))
+
+
+def scan_inbox() -> dict:
+    """{case key: uid} of the mails currently in the inbox; creates cases for new mails."""
+    mail = connect()
+    try:
+        return WORKER.scan(mail)[0]
+    finally:
+        mail.logout()
+
+
+def start_run() -> threading.Thread:
+    """One run in the background (it can take many minutes); _tick notes any error instead of raising."""
+    thread = threading.Thread(target=_tick, args=(WORKER,), name="unsubscribe-run-now", daemon=True)
+    thread.start()
+    return thread
 
 
 @app.route("/", methods=["GET"])
@@ -182,14 +254,55 @@ def oauth_error(e):
     return redirect(url_for("index", error="Mailbox not connected or token expired – connect again"))
 
 
+STATE_LABELS = {"new": "new", "running": "running", "unsubscribed": "unsubscribed",
+                "not_possible": "not possible", "unclear": "unclear"}
+
+
 @app.route("/result")
 def result():
-    mail = connect()
+    if WORKER is None:
+        mail = connect()
+        try:
+            links_data = collect_links(mail)
+        finally:
+            mail.logout()
+        return render_template("result.html", links_data=links_data)
     try:
-        links_data = collect_links(mail)
-    finally:
-        mail.logout()
-    return render_template("result.html", links_data=links_data)
+        uids, scan_failed = scan_inbox(), False
+    except ScanFailed:   # show what is stored; without the inbox no mail can be offered for trash or retry
+        uids, scan_failed = {}, True
+    cases = [dict(c, uid=uids[c["key"]].decode() if c["key"] in uids else "", label=STATE_LABELS[c["state"]])
+             for c in STORE.all()]
+    last = json.loads(STORE.meta("last_run", "{}"))
+    at = STORE.meta("last_run_at")
+    return render_template(
+        "cases.html", cases=cases, last=last, agent=bool(AGENT_URL), paused=STORE.meta("paused") == "1",
+        scan_failed=scan_failed,
+        last_at=datetime.datetime.fromtimestamp(int(at)).strftime("%Y-%m-%d %H:%M") if at else "never")
+
+
+@app.route("/run-now", methods=["POST"])
+def run_now():
+    if WORKER is None:
+        abort(404)
+    start_run()
+    return redirect(url_for("result"))
+
+
+@app.route("/retry", methods=["POST"])
+def retry():
+    if STORE is None:
+        abort(404)
+    STORE.retry(request.form.get("key", ""))
+    return redirect(url_for("result"))
+
+
+@app.route("/pause", methods=["POST"])
+def pause():
+    if STORE is None:
+        abort(404)
+    STORE.set_meta("paused", "1" if request.form.get("paused") == "1" else "0")
+    return redirect(url_for("result"))
 
 
 @app.route("/move-to-trash", methods=["POST"])

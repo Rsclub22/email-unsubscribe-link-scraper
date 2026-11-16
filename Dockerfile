@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py oauth.py index.html result.html ./
+COPY app.py oauth.py cases.py forwarded.py worker.py index.html result.html cases.html ./
 COPY static ./static
 
 RUN useradd -m -u 1000 app
