@@ -8,7 +8,7 @@ import time
 from email.utils import parseaddr
 
 from cases import case_key
-from forwarded import original_recipient
+from forwarded import original_recipient, sender_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ class Worker:
                     without += 1
                     continue
                 forwarder = parseaddr(message.get("From", ""))[1]
-                if (self.allowed_senders and forwarder.lower() not in self.allowed_senders) or (
+                if (self.allowed_senders and not sender_allowed(forwarder, self.allowed_senders)) or (
                         not self.allowed_senders and self.agent is not None):   # fail closed
                     ignored += 1
                     continue

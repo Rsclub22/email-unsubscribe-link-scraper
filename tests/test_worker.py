@@ -296,6 +296,32 @@ def test_mail_from_unknown_sender_is_ignored(store):
     assert store.get("<evil@x>") is None and b"2" in imap.folders["INBOX"]
 
 
+def test_sender_entry_without_at_allows_the_whole_domain(store):
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>", sender="Jens <JENS@Wagnersnetz.de>"),
+                     b"2": mail_bytes("<b@x>", sender="philipp@wagnersnetz.de"),
+                     b"3": mail_bytes("<c@x>", sender="someone@gmx.de")})
+    agent = Agent(OK, OK, OK)
+    summary = worker(store, imap, agent, allowed_senders=("Wagnersnetz.de", "someone@gmx.de")).run_once()
+    assert len(agent.calls) == 3 and summary["ignored"] == 0
+
+
+@pytest.mark.parametrize("sender", [
+    "mallory@evil.example",
+    "mallory@sub.wagnersnetz.de",              # a domain entry does not cover its subdomains
+    "mallory@wagnersnetz.de.evil.example",
+    "mallory@evilwagnersnetz.de",
+    "other@gmx.de",                            # a full address allows exactly that one
+    "@wagnersnetz.de",                         # not a plain address: must not pass by its last part
+    "a b@wagnersnetz.de",
+    '<"mallory@evil.example"@wagnersnetz.de>',
+])
+def test_sender_outside_the_allowed_domain_is_ignored(store, sender):
+    imap = FakeIMAP({b"1": mail_bytes("<a@x>", sender=sender)})
+    agent = Agent(OK)
+    summary = worker(store, imap, agent, allowed_senders=("wagnersnetz.de", "someone@gmx.de")).run_once()
+    assert agent.calls == [] and summary["ignored"] == 1 and store.all() == []
+
+
 def test_no_allowed_senders_with_agent_means_nobody(store):
     imap = FakeIMAP({b"1": mail_bytes("<a@x>")})
     agent = Agent(OK)
